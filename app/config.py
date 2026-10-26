@@ -22,7 +22,9 @@ class Settings(BaseSettings):
     auto_approve_limit: float = 50000   # correct invoices above this still need approval
     amount_tolerance: float = 1.0       # rupees, for rounding differences
     min_confidence: float = 0.85        # extraction confidence floor
-    max_pages: int = 5
+    max_pages: int = 5                  # longer PDFs: first and last page plus the pages with most amounts
+    supplier_min_history: int = 3       # approved invoices before "far above the usual amount" applies
+    supplier_amount_factor: float = 3.0  # ...a total above this many times the supplier's highest so far
     max_upload_mb: int = 15
     processing_timeout_minutes: int = 15
 

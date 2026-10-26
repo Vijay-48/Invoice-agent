@@ -27,6 +27,12 @@ class ExtractedLine(BaseModel):
     gst_rate: float = Field(description="total GST %, e.g. 18")
 
 
+class HsnSummaryRow(BaseModel):
+    hsn_sac: str = Field(description="digits only")
+    taxable_value: float
+    tax_amount: float = Field(description="CGST+SGST or IGST for this HSN, total")
+
+
 class ExtractedInvoice(BaseModel):
     document_type: DocumentType
     supplier_name: str
@@ -43,6 +49,7 @@ class ExtractedInvoice(BaseModel):
     po_number: str | None
     irn: str | None
     lines: list[ExtractedLine]
+    hsn_summary: list[HsnSummaryRow] = Field(description="the HSN-wise tax summary table if printed, else []")
     taxable_total: float
     cgst: float
     sgst: float
@@ -70,6 +77,7 @@ def from_stored(data: dict) -> ExtractedInvoice:
     """Rebuild a stored extraction; fills fields added after it was stored."""
     return ExtractedInvoice(**{"voucher_number": None, "voucher_date": None, "invoice_kind": "regular",
                                "reference_invoice_number": None, "currency": "INR", "amount_in_words": None,
+                               "hsn_summary": [],
                                **data})
 
 

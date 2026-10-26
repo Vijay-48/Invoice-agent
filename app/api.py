@@ -39,6 +39,7 @@ from app import chat_store
 from app.models import (Invoice, AuditLog, ChatMessage, ChatSession, EmailMessage, PdfPassword, User, Status,
                         audit)
 from app.pipeline.evaluate import evaluate
+from app.pipeline.supplier import list_suppliers
 from app.schemas import InvoiceCorrection, from_stored
 
 
@@ -272,6 +273,14 @@ def get_email(email_id: int, session: Session = Depends(get_session)):
     return {**serialize_email(e, _statuses(session, [e])), "body_snippet": e.body_snippet}
 
 
+# ---------- suppliers (built from approved invoices)
+
+@api.get("/suppliers")
+def suppliers(session: Session = Depends(get_session)):
+    """Every supplier with approved invoices: what they usually bill, for the reviewer's context."""
+    return list_suppliers(session)
+
+
 # ---------- invoices
 
 def serialize(inv: Invoice) -> dict:
@@ -409,7 +418,7 @@ def approve(invoice_id: int, body: Review = Review(), user: User = Depends(curre
     inv.approved_at = datetime.now(timezone.utc)
     inv.status_reason = f"Approved by {user.name}"
     session.commit()
-    error = try_export(session)
+    error = try_export(session, wait=False)   # an export already running writes it within seconds
     session.refresh(inv)
     return {**serialize(inv), "excel_error": error}
 

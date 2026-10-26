@@ -667,3 +667,127 @@ Not yet fixed (next batches): the remaining low findings, among them:
   - Uploads took 2.5 s; everything was read in 6 s with the stand-in reader (with the real AI, expect
     ~5–20 s per document, 4 at a time).
 - **Where**: `scripts/make_test_invoices.py`, `scripts/simulate_users.py`, `tests/test_generated_invoices.py`.
+
+---
+
+## 12. Roadmap items built without outside decisions (2026-10-26)
+
+### D-92 HSN-wise tax summary is read and cross-checked (Phase 2 item 8, last part)
+
+- **Decision**: The AI also returns `hsn_summary` (HSN, taxable value, tax per row) when the invoice prints
+  that table. Check `hsn_summary` fails if the rows' taxable total or tax total differs from the invoice's
+  by more than `AMOUNT_TOLERANCE`, or if a HSN's lines add up to something other than its summary row
+  (an HSN of 4 digits matches lines of 8 digits). No table printed = no check.
+- **Why**: The summary is a second, separately printed set of totals. A misread digit in the lines or in
+  the totals shows up as a disagreement, like the amount in words (D-42).
+- **Instead of**: Trusting the lines alone.
+- **Trade-off**: One more field for the AI to fill (more output tokens); a wrongly read summary sends a
+  correct invoice to review (the second reading can fix it: `hsn_summary` is in `FIXABLE`).
+- **Refined by D-95**: kept only when the document's text shows the table (the AI invents one otherwise),
+  rows of one HSN summed, and the second reading can't pass the check by changing only the summary.
+- **Where**: `app/schemas.py` (`HsnSummaryRow`), `app/pipeline/validate.py` (`hsn_summary_checks`),
+  `app/pipeline/extract.py` (instructions), `app/pipeline/reading.py` (`FIXABLE`).
+
+### D-93 Long documents: read the pages that matter, and say which (Phase 2 item 5, first half)
+
+- **Decision**: Over `MAX_PAGES` (5), the AI gets the first page, the last page and the pages with the most
+  amounts, skipping terms-and-conditions pages, instead of simply the first five. The `pages` check names
+  the pages read.
+- **Why**: Totals sit on the last page and line items in the middle; "first five" lost the totals of any
+  longer invoice, so it could never pass.
+- **Instead of**: Reading every page in chunks and merging the results (not done: merging line items and
+  totals across calls is easy to get wrong and costs several AI calls).
+- **Trade-off**: The pick is a guess from text amounts; a scanned PDF has no text, so for scans the amount
+  count is 0 for every page and the choice is first, last and the earliest others. The `pages` WARN still
+  sends every such document to review.
+- **Where**: `app/pipeline/extract.py` (`select_pages`, `prepare_pages`), `app/pipeline/evaluate.py` (`pages_check`).
+
+### D-94 Supplier history from approved invoices; no separate master to maintain (Phase 3 item 5)
+
+- **Decision**: A supplier is its GSTIN's approved invoices (APPROVED or EXPORTED). Each new invoice is
+  compared with them:
+  - New supplier: informational PASS only, because a warning would send every first invoice to review and
+    nothing could ever become known (D-02).
+  - Same GSTIN, different name: WARN, so review. Catches a misread GSTIN that happens to be valid.
+    Names compare without case, punctuation and "Pvt/Private Ltd/Limited".
+  - Total above `SUPPLIER_AMOUNT_FACTOR` (3) times the highest so far, once the supplier has
+    `SUPPLIER_MIN_HISTORY` (3) approved invoices: WARN. Credit notes are exempt.
+  - `GET /api/v1/suppliers` lists suppliers with count, highest, average, spend.
+- **Why**: A wrong amount that still adds up passes every arithmetic check; the supplier's own history is
+  the only thing that notices it.
+- **Instead of**: A supplier table to fill in by hand (never kept up to date), or a stored copy updated on
+  approval (can drift from the invoices; computing from invoices cannot).
+- **Trade-off**: The profile is a query per invoice. Not built: bank details (not extracted), a GSTIN
+  live-status check (needs a GSP account, Phase 3 item 1).
+- **Where**: `app/pipeline/supplier.py`, `app/pipeline/evaluate.py`, `app/api.py` (`/suppliers`), `app/config.py`.
+
+### D-95 Review of D-92…D-94 with real runs and 50,000-invoice load tests: fixes and known limits (2026-10-26)
+
+How it was checked:
+- Golden set on the real AI (`scripts/evaluate`).
+- 2 users × 9 scenarios through the running API with the real AI (`scripts/simulate_users`).
+- A test database seeded with 50,000 invoices of 30 lines, 20,000 of them from one supplier.
+- A 300-page PDF.
+- 226 tests.
+
+Found and fixed:
+
+1. **The AI invents the HSN summary.** All 3 real invoices and every generated one print no HSN summary
+   table, yet gpt-4o-mini returned one built from the lines, so `hsn_summary` compared the AI with itself.
+   - **Decision**: the summary is kept only when the document's text shows one: a titled HSN/tax summary,
+     or a second HSN column after the line items' (or one, when the lines have none). Otherwise it is
+     dropped and logged. Scans have no text, so for them the check doesn't run.
+   - **Trade-off**: a summary whose header the text layer splits oddly is missed (no check, as before D-92).
+   - **Where**: `extract.hsn_summary_printed`.
+2. **The HSN prompt line moved the ITI journal's tax from IGST to CGST** (3 of 3 runs; key fields 98.1%).
+   - **Decision**: the line moved to the end of the invoice section, and journals are told `hsn_summary []`.
+   - **Result**: 3 of 3 correct, and the golden set is back to 100% key fields, 98.9% all fields, 0 wrong
+     auto-approvals.
+   - **Lesson**: any prompt change can shift unrelated fields. Run the golden set after every one.
+3. **The second reading could pass the HSN check by changing only the summary.**
+   - Dropping the summary is now an "escape" (the first reading is kept).
+   - A fix that changed only the summary is a WARN ("confirm against the document").
+   - HSN summary changes appear in the change list.
+   - **Where**: `reading._escapes_checks`, `reading._differences`.
+4. **One HSN can have several summary rows (one per GST rate)**: they are summed per HSN before
+   comparing, instead of giving a false FAIL. **Where**: `validate.hsn_summary_checks`.
+5. **The supplier check loaded every approved invoice of the supplier with its JSON**: 4.7 s per document
+   at 20,000 invoices.
+   - **Decision**: aggregated in SQL per name; now 0.07 s.
+   - **Where**: `supplier.profile`.
+6. **The look-alike number search loaded every invoice of the supplier with a same-length number**
+   (pre-existing, D-42). A supplier's numbers usually all have the same length, so it took 4.6 s at 20,000,
+   inside the duplicate lock.
+   - **Decision**: compared in SQL with `translate()`; now 0.09 s for the whole duplicate check.
+   - **Where**: `validate._look_alike_numbers`.
+7. **Excel export was quadratic** (pre-existing). `ws.max_row` scans every cell, and it was called per
+   appended row: 1,000 invoices took 323 s. Now 8 s. **Where**: `excel._append`.
+8. **Workers and the Approve click queued behind a running export** (pre-existing).
+   - **Decision**: they now skip it (`pg_try_advisory_xact_lock`); the running or next export writes their
+     invoices within ~10 s. The Excel download still waits, so it gets a current file.
+   - **Where**: `excel.export_pending(wait=)`, `worker.export`, `api.approve`.
+9. **Assistant tools loaded every invoice with all line items** (pre-existing). At 50,000 invoices
+   `invoice_statistics`/`supplier_summary` took ~43 s and ~1 GB each.
+   - **Decision**: only the needed columns and JSON values; the GST-rate grouping is summed in SQL; the
+     "unusually large" scan reads ids and amounts first.
+   - **Result**: 0.6–3.9 s, 1–54 MB.
+   - **Where**: `assistant_tools._columns`, `_statistics_by_gst_rate`, `needs_attention`.
+
+Known limits, not fixed (need a decision or are acceptable for now):
+
+- **The workbook is rewritten whole on every export (D-01).**
+  - Measured with 30-line invoices: one more invoice into a workbook of 1,000 invoices takes 14 s, and
+    into one of 3,000 takes 37 s. It grows linearly, so expect minutes at 10,000+, and memory to match.
+  - Exports batch everything pending, so throughput holds, but the file lags further behind.
+  - Fix: one workbook per financial year, or the database as the register with Excel generated on demand
+    (Phase 5). Both change D-01: your decision.
+- **`export_invoices` (assistant) loads every matching invoice**: it must, to write them. A full-history
+  export at 50,000 invoices needs ~1 GB of memory.
+- **No migrations (Phase 4)**: `create_all` never adds columns or indexes to existing tables. The new data
+  lives in the JSON column, so nothing needed changing this time; the next new column will.
+- **Unbounded growth**: `audit_log` rows, stored files and per-page PNG renders are never cleaned up
+  (no retention policy, Phase 4).
+- **Supplier rules**: a legitimate rename sends that supplier's invoices to review until one is approved
+  under the new name; the "far above usual" rule needs 3 approved invoices first, so a new supplier's large
+  first invoices are only caught by the ₹50,000 limit.
+- **Scans**: no HSN check, and page choice for long scans is first, last and the earliest others.

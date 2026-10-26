@@ -300,7 +300,8 @@ def test_prepare_pages_and_extract(tmp_path, monkeypatch):
     doc.save(pdf)
     doc.close()
     images, text, total = extract.prepare_pages(str(pdf))
-    assert len(images) == 5 and "page 5" in text and "page 6" not in text
+    # Over the limit: the first and last pages, then the next in order when all look alike
+    assert len(images) == 5 and "page 7 ---" in text and "page 4 ---" in text and "page 5 ---" not in text
     assert extract.page_count(str(pdf)) == 7
 
     seen = {}

@@ -94,7 +94,7 @@ def make_extracted(**overrides) -> ExtractedInvoice:
         supplier_gstin=SUPPLIER_GSTIN, buyer_gstin="36AABCT1234F1ZR", invoice_number="SLS/26-27/118",
         invoice_date="2026-09-15", voucher_number=None, voucher_date=None, invoice_kind="regular",
         reference_invoice_number=None, currency="INR", place_of_supply_state_code="36", po_number="PO-2026-0042", irn=None,
-        lines=lines, taxable_total=taxable, cgst=tax / 2, sgst=tax / 2, igst=0, round_off=0,
+        lines=lines, hsn_summary=[], taxable_total=taxable, cgst=tax / 2, sgst=tax / 2, igst=0, round_off=0,
         grand_total=taxable + tax, amount_in_words=None, confidence=0.95, low_confidence_fields=[],
     )
     base.update(overrides)
@@ -106,5 +106,5 @@ def not_an_invoice() -> ExtractedInvoice:
         document_type="other", supplier_name="", supplier_gstin=None, buyer_gstin=None,
         invoice_number="", invoice_date="", voucher_number=None, voucher_date=None, invoice_kind="regular",
         reference_invoice_number=None, currency="INR", place_of_supply_state_code=None, po_number=None, irn=None,
-        lines=[], taxable_total=0, cgst=0, sgst=0, igst=0, round_off=0, grand_total=0, amount_in_words=None,
+        lines=[], hsn_summary=[], taxable_total=0, cgst=0, sgst=0, igst=0, round_off=0, grand_total=0, amount_in_words=None,
         confidence=0.9, low_confidence_fields=[])

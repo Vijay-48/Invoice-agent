@@ -90,7 +90,9 @@ def _safe(v):
 
 def _append(ws, columns, values):
     ws.append(values)
-    row = ws.max_row
+    # The row append() just wrote. Not ws.max_row: that scans every cell of the sheet, so each export got
+    # slower with the workbook's size (1,000 invoices of 30 lines took 5 minutes, D-95)
+    row = ws._current_row
     for i, (_, _w, fmt) in enumerate(columns, start=1):
         if fmt:
             ws.cell(row=row, column=i).number_format = fmt
@@ -140,10 +142,17 @@ def _rows(inv: Invoice, user: User | None):
     return [_safe(v) for v in invoice_row], [[_safe(v) for v in r] for r in line_rows]
 
 
-def export_pending(session: Session) -> int:
+def export_pending(session: Session, wait: bool = True) -> int:
     """Write every APPROVED invoice to the workbook and mark it EXPORTED.
-    Returns how many were exported. Raises ExcelLocked if the file is open in Excel."""
-    session.execute(text("SELECT pg_advisory_xact_lock(:ns, 0)"), {"ns": EXCEL_LOCK})
+    Returns how many were exported. Raises ExcelLocked if the file is open in Excel.
+    `wait=False`: when another export is running, return 0 at once; it (or the next one) writes these
+    too. Loading and saving the whole workbook takes seconds to minutes as it grows (D-95), and worker
+    threads or a reviewer's Approve click must not queue behind it."""
+    if wait:
+        session.execute(text("SELECT pg_advisory_xact_lock(:ns, 0)"), {"ns": EXCEL_LOCK})
+    elif not session.scalar(text("SELECT pg_try_advisory_xact_lock(:ns, 0)"), {"ns": EXCEL_LOCK}):
+        session.commit()
+        return 0
     pending = session.scalars(select(Invoice).where(Invoice.status == Status.APPROVED)
                               .order_by(Invoice.approved_at, Invoice.id)).all()
     if not pending:
@@ -219,14 +228,14 @@ def export_pending(session: Session) -> int:
 _last_problem: str | None = None   # logged once, not on every retry
 
 
-def try_export(session: Session) -> str | None:
+def try_export(session: Session, wait: bool = True) -> str | None:
     """export_pending() that never raises; returns an error message or None.
 
     The worker retries every few seconds, so the same problem (typically the workbook
     left open in Excel) is logged once, and shown on the waiting invoices' `error`."""
     global _last_problem
     try:
-        export_pending(session)
+        export_pending(session, wait)
         if _last_problem:
             log.info("Excel export working again")
             _last_problem = None

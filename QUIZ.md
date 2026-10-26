@@ -341,3 +341,29 @@ text cells, line items, control characters and negative numbers.
     once" work across two processes, and the one case where it still sends twice.
 25. Open the latest audit report. Choose one confirmed finding and explain the root cause, the fix, and
     which quiz answer above changes after the fix.
+
+26. (2026-10-26) An invoice prints a HSN summary saying HSN 7306 has taxable 4,600, but its lines for
+    7306 add up to 4,500, and everything else is consistent. Which check fails, what status does the invoice
+    get, and what is the likeliest cause? Then: why does a printed summary of "8544" still match lines with
+    HSN "85444999"? [D-92]
+27. (2026-10-26) A 9-page invoice arrives. Which pages go to the AI, why those, and what does the reviewer
+    see? What changes for a scanned PDF of 9 pages, where the pages have no text? [D-93]
+28. (2026-10-26) The same GSTIN has three approved invoices of about ₹6,000 and a fourth arrives for
+    ₹23,600, under the ₹50,000 limit, all arithmetic correct. What happens and why? Why is the first invoice
+    of a brand-new supplier not held for review by the same check? [D-94, D-02]
+
+29. (2026-10-26) gpt-4o-mini returned an HSN summary for the HFCL invoice, which prints none. Why would
+    the `hsn_summary` check still have passed, why is that worse than no check, and what does
+    `hsn_summary_printed` look for instead? Why can't it help with scans? [D-95 §1]
+30. (2026-10-26) Adding one sentence about HSN to the prompt made the ITI journal's tax land in CGST
+    instead of IGST. Which tool showed it, how was the cause proved (not guessed), and what rule follows
+    for every future prompt change? [D-95 §2]
+31. (2026-10-26) A supplier has 20,000 approved invoices numbered like SLS/26-27/00001. Explain why the
+    old look-alike search took ~4.6 s per new invoice, why that time mattered more than its size
+    suggests (which lock was held?), and how `translate()` in SQL fixes it. [D-95 §6]
+32. (2026-10-26) The first export of 1,000 approved invoices took 323 s, yet adding one more invoice
+    afterwards still takes 14 s after the fix. Explain both numbers, which one was a bug, and what
+    decision the second one needs. [D-95 §7, known limits, D-01]
+33. (2026-10-26) Reviewer A clicks Approve while a worker is in the middle of a 30-second export. What
+    happened before D-95, what happens now, and when does A's invoice reach Excel? What changes if
+    `RUN_WORKER=false` and `RUN_EXCEL_EXPORT=false`? [D-95 §8]

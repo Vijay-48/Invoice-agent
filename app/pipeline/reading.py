@@ -24,7 +24,7 @@ from app.schemas import ExtractedInvoice
 log = logging.getLogger("reading")
 # Checks a misreading can cause (not: duplicates, pages, the business rules)
 FIXABLE = {"lines", "line_total", "tax_amount", "grand_total", "gst_type", "supplier_gstin", "buyer_gstin",
-           "invoice_date", "confidence", "amount", "supplier_name", "invoice_number", "amount_in_words"}
+           "invoice_date", "confidence", "amount", "supplier_name", "invoice_number", "amount_in_words", "hsn_summary"}
 
 
 @dataclass
@@ -108,7 +108,11 @@ def read_document(file_path: str, name: str, *, hints: str | None = None, passwo
         message = (f"Read again by {second_model} because checks failed; fixed: {', '.join(fixed)}"
                    + (f" (changed {', '.join(changed)})" if changed else ""))
         money_changed = any(c.split(" ")[0] in MONEY_FIELDS for c in changed) or "line items" in changed
-        if money_changed and not _total_in_text(second.grand_total, file_path, passwords):
+        if "hsn_summary" in fixed and changed == ["HSN summary"]:
+            # Only the summary moved to agree with the lines: a copy of them, not a better reading of it
+            reading.checks.append(Check("second_reading", WARN, message + ". Only the HSN summary changed, so "
+                                        "please confirm it against the document"))
+        elif money_changed and not _total_in_text(second.grand_total, file_path, passwords):
             # The AI changed amounts and the document's own text can't confirm the new total: a model
             # could have made the numbers add up instead of reading them. A person confirms.
             reading.checks.append(Check("second_reading", WARN, message + ". The corrected total isn't in the "
@@ -137,6 +141,8 @@ def _escapes_checks(first: ExtractedInvoice, second: ExtractedInvoice, problems:
         return f"the document type ({first.document_type} -> {second.document_type})"
     if (second.currency or "INR").upper() != (first.currency or "INR").upper():
         return f"the currency ({first.currency} -> {second.currency})"
+    if first.hsn_summary and not second.hsn_summary:
+        return "the HSN summary (dropped, so it can't be checked)"
     for name in ("supplier_gstin", "buyer_gstin"):
         a, b = getattr(first, name), getattr(second, name)
         if name not in named and (a or "") != (b or ""):
@@ -175,4 +181,6 @@ def _differences(a: ExtractedInvoice, b: ExtractedInvoice) -> list[str]:
             out.append(f"{f.replace('_', ' ')} {getattr(a, f)!r} -> {getattr(b, f)!r}")
     if [l.model_dump() for l in a.lines] != [l.model_dump() for l in b.lines]:
         out.append("line items")
+    if [r.model_dump() for r in a.hsn_summary] != [r.model_dump() for r in b.hsn_summary]:
+        out.append("HSN summary")
     return out
