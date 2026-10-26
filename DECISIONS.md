@@ -28,6 +28,7 @@ Dates are when the decision was made (approximate for the first days of the proj
 - **Trade-off**: A file is not a database. Concurrent writers need a lock (D-24), the file can be open in
   Excel (writes wait), and edits made in Excel never come back to the system. The roadmap (Phase 5)
   plans "database as the register, Excel generated from it".
+- **Refined by D-96** (2026-10-26): one workbook per financial year, `invoices FY2026-27.xlsx`.
 - **Where**: `app/excel.py`.
 
 ### D-02 Auto-approve only when every check passes and the total is at most ₹50,000 (≈ 2026-10-06)
@@ -791,3 +792,33 @@ Known limits, not fixed (need a decision or are acceptable for now):
   under the new name; the "far above usual" rule needs 3 approved invoices first, so a new supplier's large
   first invoices are only caught by the ₹50,000 limit.
 - **Scans**: no HSN check, and page choice for long scans is first, last and the earliest others.
+
+### D-96 One Excel workbook per financial year (refines D-01) (2026-10-26)
+
+- **Decision**:
+  - Approved invoices go to `invoices FY2026-27.xlsx`, next to `EXCEL_PATH`, chosen by the Indian
+    financial year (April–March) of the **invoice date**. An invoice with no readable date uses the
+    approval date.
+  - `EXCEL_PER_FINANCIAL_YEAR=false` keeps the single `EXCEL_PATH` workbook.
+  - An existing `invoices.xlsx` from before the split is left untouched and still downloadable.
+- **Why**: Every export loads and saves the whole workbook (D-95). One file that grows forever made each
+  export slower: 37 s at 3,000 invoices, minutes at 10,000+. A year's file stops growing on 31 March.
+  The invoice date is the date accountants file under, and GST returns are per financial year too.
+- **Instead of**:
+  - One workbook per month: smaller files, but twelve files a year to open and total.
+  - The database as the register with Excel generated on demand (Phase 5): the full fix, 1–2 weeks, and a
+    change in how the team gets Excel. Still the plan for later; this keeps exports fast until then.
+- **Trade-off**:
+  - A year's totals need its own file, and an invoice dated last year but approved today goes to last
+    year's file, which accountants must know.
+  - A very busy year still grows: about 3,000 invoices of 30 lines means ~37 s per export by March.
+  - The assistant's `read_excel` reads one year at a time (it says which, and lists the others).
+- **Also**: a workbook open in Excel now holds back only its own year's invoices; the other years are
+  written.
+- **API**:
+  - `GET /api/v1/excel` returns this financial year's workbook, or the newest there is.
+  - `?year=2025-26` picks a year, and `?year=all` the old single file.
+  - `GET /api/v1/excel/workbooks` lists them.
+- **Where**: `app/excel.py` (`fy_label`, `workbook_for`, `list_workbooks`, `find_workbook`,
+  `export_pending`, `_write_workbook`), `app/api.py`, `app/assistant_tools.py` (`read_excel`),
+  `app/config.py`, `tests/test_workbooks.py`.

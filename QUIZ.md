@@ -367,3 +367,11 @@ text cells, line items, control characters and negative numbers.
 33. (2026-10-26) Reviewer A clicks Approve while a worker is in the middle of a 30-second export. What
     happened before D-95, what happens now, and when does A's invoice reach Excel? What changes if
     `RUN_WORKER=false` and `RUN_EXCEL_EXPORT=false`? [D-95 §8]
+
+34. (2026-10-26) An invoice dated 2026-03-28 is approved on 2026-04-03. Which workbook gets it, why that one
+    and not the approval date's, and what does `GET /api/v1/excel` without `year` return that day? [D-96]
+35. (2026-10-26) `invoices FY2025-26.xlsx` is open in Excel on an accountant's PC while three invoices are
+    approved: two dated this year, one dated last year. What is written, what waits, and where does the
+    reviewer see why? Compare with what happened before D-96. [D-96, D-24]
+36. (2026-10-26) Why does splitting by year fix the slow export only "until a single year gets very busy",
+    and what would remove the limit for good? [D-95 known limits, D-96, Phase 5]

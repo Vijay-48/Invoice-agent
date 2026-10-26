@@ -109,7 +109,7 @@ def _tool_outputs(result) -> tuple[list[dict], list[dict], list[dict]]:
         if isinstance(data, dict):
             if data.get("download_url"):
                 files.append({"url": data["download_url"],
-                              "name": data.get("file_name") or ("invoices.xlsx" if data["download_url"].endswith("/excel")
+                              "name": data.get("file_name") or ("invoices.xlsx" if "/excel" in data["download_url"]
                                                                  else data["download_url"].rsplit("/", 1)[-1]),
                               "rows": data["rows"] if isinstance(data.get("rows"), int) else data.get("matching_rows")})
             if data.get("proposal"):

@@ -1,6 +1,6 @@
 # Roadmap: from working prototype to production
 
-Update 2026-10-26: built HSN-summary cross-check (Phase 2 #8 complete), page selection for long PDFs (#5, first half; chunked reading not done), supplier history checks and `GET /suppliers` (Phase 3 #5, without bank details). Details: DECISIONS.md D-92 to D-94. Reviewed the same day with real runs and a 50,000-invoice load test (D-95): fixed the AI inventing HSN summaries and four slow paths (supplier check, look-alike search, Excel append, assistant summaries); the single growing workbook is the remaining scale limit and needs the D-01 / Phase 5 decision.
+Update 2026-10-26: built HSN-summary cross-check (Phase 2 #8 complete), page selection for long PDFs (#5, first half; chunked reading not done), supplier history checks and `GET /suppliers` (Phase 3 #5, without bank details). Details: DECISIONS.md D-92 to D-94. Reviewed the same day with real runs and a 50,000-invoice load test (D-95): fixed the AI inventing HSN summaries and four slow paths (supplier check, look-alike search, Excel append, assistant summaries); the single growing workbook was the remaining scale limit: now one workbook per financial year (D-96); Phase 5 (database register) remains the full fix.
 
 Status (15 October 2026): Phase 0 set up, **Phase 1 done**, **Phase 2 mostly done** (items 1-4, 7, 8);
 next decisions are listed at the end. Also built outside the original plan: the AI assistant (chat with

@@ -112,7 +112,8 @@ def test_old_workbook_rows_with_the_same_id_do_not_hide_new_invoices(client, use
     wb.create_sheet("Line Items").append(["Invoice ID"])
     from pathlib import Path
     Path(settings.excel_path).parent.mkdir(parents=True, exist_ok=True)
-    wb.save(settings.excel_path)
+    from app import excel
+    wb.save(excel.workbook_path("2026-27"))
     fake_extract.append(make_extracted())
     inv_id = upload(client, users["priya"])["invoice_id"]
     assert inv_id == 1

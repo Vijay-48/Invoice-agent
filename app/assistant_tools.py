@@ -23,7 +23,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 
 from app.config import settings
 from app.db import SessionLocal
-from app.excel import _safe
+from app.excel import _safe, find_workbook, list_workbooks
 from app.models import AuditLog, EmailMessage, Invoice, Status, User
 
 MAX_ROWS = 50
@@ -219,18 +219,26 @@ def _statistics_by_gst_rate(status: str, supplier: str, date_from: str, date_to:
                   "groups": out[:MAX_ROWS]})
 
 
-def read_excel(sheet: str = "Invoices", search: str = "", limit: int = 30) -> str:
-    """Read the Excel workbook of approved invoices (output/invoices.xlsx) exactly as it is on disk.
+def read_excel(sheet: str = "Invoices", search: str = "", limit: int = 30, year: str = "") -> str:
+    """Read an Excel workbook of approved invoices exactly as it is on disk. There is one workbook per
+    financial year (April-March, by invoice date).
 
     Args:
         sheet: "Invoices" (one row per invoice) or "Line Items" (one row per item).
         search: only rows containing this text in any cell (case-insensitive).
         limit: rows to return (max 50).
-    Returns headers, matching rows, totals of the amount columns over ALL matching rows, and a
-    download_url for the workbook."""
-    path = Path(settings.excel_path)
-    if not path.exists():
-        return _json({"error": "The Excel workbook doesn't exist yet: no invoice has been approved."})
+        year: financial year like "2026-27"; empty = the current one (or the newest there is).
+    Returns the workbook's year, headers, matching rows, totals of the amount columns over ALL matching
+    rows, the other years available, and a download_url for the workbook."""
+    try:
+        path = find_workbook(year.strip() or None)
+    except ValueError as e:
+        return _json({"error": str(e)})
+    years = [w["year"] for w in list_workbooks() if w["year"]]
+    if path is None:
+        return _json({"error": f"No Excel workbook for {year}." if year.strip() else
+                      "The Excel workbook doesn't exist yet: no invoice has been approved.", "years": years})
+    shown_year = next((w["year"] for w in list_workbooks() if w["path"] == path), None)
     # Read from memory: an open file handle would stop the worker from replacing the workbook (Windows)
     wb = load_workbook(io.BytesIO(path.read_bytes()), read_only=True, data_only=True)
     if sheet not in wb.sheetnames:
@@ -251,9 +259,11 @@ def read_excel(sheet: str = "Invoices", search: str = "", limit: int = 30) -> st
         if isinstance(v, datetime):
             return v.date().isoformat() if (v.hour, v.minute, v.second) == (0, 0, 0) else v.isoformat(" ", "minutes")
         return v
-    return _json({"sheet": sheet, "headers": headers, "matching_rows": len(data), "totals": totals,
+    return _json({"year": shown_year, "other_years": [y for y in years if y != shown_year], "sheet": sheet,
+                  "headers": headers, "matching_rows": len(data), "totals": totals,
                   "rows": [dict(zip(headers, map(cell, r))) for r in data[:min(max(limit, 1), MAX_ROWS)]],
-                  "download_url": f"{API}/excel"})
+                  "download_url": f"{API}/excel" + (f"?year={shown_year}" if shown_year else ""),
+                  "file_name": path.name})
 
 
 def list_emails(outcome: str = "", days: int = 7, limit: int = 30) -> str:

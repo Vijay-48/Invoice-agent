@@ -318,7 +318,20 @@ The Python locks are per process. That is one reason the API must run as one pro
 
 ---
 
-## You are here (2026-10-26, after reviewing D-92…D-94 with real runs and load tests)
+## You are here (2026-10-26, after the workbook split)
+
+### Workbook per financial year (D-96; 231 tests pass)
+
+- §4.3 export: `excel.export_pending` groups the APPROVED invoices by `workbook_for` (financial year of the
+  invoice date) and writes each group with `_write_workbook` into `invoices FY<year>.xlsx`. A workbook open
+  in Excel only holds back its own year (`ExcelLocked` raised after the others are committed).
+- Download: `GET /api/v1/excel[?year=2026-27|all]`, `GET /api/v1/excel/workbooks`; the assistant's
+  `read_excel(year=...)`.
+- Real run: 2 users × 9 scenarios with the real AI, 18/18 expected outcomes, all in `invoices FY2026-27.xlsx`.
+- This removes the main scale limit from D-95 until a single year gets very busy; the full fix is still
+  Phase 5 (database register).
+
+## Earlier the same day: review of D-92…D-94 with real runs and load tests
 
 ### Review and load test (D-95; 226 tests pass)
 

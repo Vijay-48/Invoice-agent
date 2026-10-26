@@ -6,7 +6,8 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://ap:ap@localhost:5432/ap"
     storage_dir: str = "./storage"              # original invoice files
-    excel_path: str = "./output/invoices.xlsx"  # approved invoices are appended here
+    excel_path: str = "./output/invoices.xlsx"  # approved invoices are appended here...
+    excel_per_financial_year: bool = True       # ...as "invoices FY2026-27.xlsx", one per financial year
     export_dir: str = "./output/exports"        # files created by the assistant
 
     # AI extraction. The keys are read from .env here because the OpenAI and
