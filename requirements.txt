@@ -1,0 +1,21 @@
+fastapi
+uvicorn[standard]
+python-multipart
+email-validator
+sqlalchemy>=2.0
+psycopg[binary]
+pydantic-settings
+agno
+openai
+pymupdf
+composio
+openpyxl
+httpx
+anyio
+python-docx
+numpy
+# e-invoice QR: QRCodeDetectorAruco needs OpenCV 4.8 or later (any opencv-python variant works)
+opencv-python-headless>=4.8
+PyJWT
+cryptography
+# optional, reads dense QR codes more reliably than OpenCV: zxing-cpp

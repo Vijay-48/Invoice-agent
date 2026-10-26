@@ -1,0 +1,6 @@
+{
+  "company_gstin": "19AABCT1332L2ZA,36AABCT1234F1ZR",
+  "auto_approve_limit": 50000,
+  "min_confidence": 0.85,
+  "amount_tolerance": 1.0
+}

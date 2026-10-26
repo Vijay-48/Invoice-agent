@@ -1,0 +1,7 @@
+.env
+storage/
+output/
+__pycache__/
+golden/docs/
+golden/expected/
+reports/
