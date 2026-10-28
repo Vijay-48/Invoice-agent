@@ -36,7 +36,7 @@ def _ai_problem(kind: str, message: str) -> None:
         ai_status["since"] = datetime.now(timezone.utc)
     ai_status.update(problem=message[:300], kind=kind)
 
-
+ 
 def _ai_ok() -> None:
     if ai_status["problem"]:
         log.info("AI service works again")

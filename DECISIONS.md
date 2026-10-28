@@ -822,3 +822,44 @@ Known limits, not fixed (need a decision or are acceptable for now):
 - **Where**: `app/excel.py` (`fy_label`, `workbook_for`, `list_workbooks`, `find_workbook`,
   `export_pending`, `_write_workbook`), `app/api.py`, `app/assistant_tools.py` (`read_excel`),
   `app/config.py`, `tests/test_workbooks.py`.
+
+---
+
+## 13. WhatsApp channel (2026-10-28)
+
+### D-97 WhatsApp invoices through Twilio, ported unchanged from the earlier Twilio build
+
+- **Decision**: Invoices sent on WhatsApp come in through Twilio. Twilio POSTs each message to
+  `POST /api/v1/webhook/whatsapp` (`PUBLIC_BASE_URL` + that path, set in the Twilio Console). The code
+  (`app/whatsapp.py` and its tests) is copied as-is from the earlier Twilio integration in the
+  `Terasoft/app` copy of the project, not rewritten.
+  - Every request needs a valid `X-Twilio-Signature` (HMAC of the public URL + form fields, keyed with
+    `TWILIO_AUTH_TOKEN`), checked before any field is read. With no token, every request gets 403.
+  - Senders map to users with `WHATSAPP_SENDERS` (`number:user_id,...`). Unknown numbers, invalid
+    entries and missing users are ignored and logged (masked number, never the text).
+  - Attachments are downloaded after the 200 reply (FastAPI background task): only this account's
+    media on `api.twilio.com` over HTTPS, credentials on the first request only, redirects only to
+    Twilio/AWS hosts, at most `MAX_UPLOAD_MB`, 60 s per file, and the bytes must match the announced
+    type. Each one goes to `ingest_document(..., "whatsapp", ...)`, so hash dedupe, the worker,
+    checks, review and Excel are the same as for uploads.
+- **Why**: The user had already built and tested this with Twilio and asked for that code, not a
+  new design.
+- **Instead of**: The Meta WhatsApp Cloud API directly (a fresh client, webhook verification, sending
+  replies), which was being started before the user pointed to the Twilio code.
+- **Trade-off**:
+  - Incoming only: no replies or status messages to the sender, and plain text messages are only logged.
+  - No WhatsApp message log in the database (Gmail has `email_messages`): a rejected attachment is
+    only in the logs.
+  - A download that fails isn't retried. Twilio retries only when the webhook itself fails, and
+    downloads run after the reply, so the sender must send it again.
+  - Containers (.zip/.eml) are rejected: single documents only.
+  - The sender is stored masked (`whatsapp:+91******3210`) on the invoice.
+  - Senders live in `.env`, not in the users table: a change needs a restart.
+  - Needs a public HTTPS address (ngrok in development) whose URL matches `PUBLIC_BASE_URL` exactly.
+- **Also**: `tests/conftest.py` now pins `PUBLIC_BASE_URL` and blanks the Twilio settings, so a real
+  `.env` (e.g. an ngrok URL) can't leak into tests. The ngrok `PUBLIC_BASE_URL` had broken
+  `test_gmail.py::test_connect_and_activate_flow`.
+- **Where**: `app/whatsapp.py`, `app/api.py` (`include_router(whatsapp.router)`), `app/config.py`,
+  `requirements.txt` (`twilio>=9.0`), `.env.example`, `tests/test_whatsapp_webhook.py` (110 tests; its
+  `SAMPLE_PDF`/`FakeAgent` helpers were copied from the source's `test_extract_preview.py`),
+  `tests/conftest.py`.

@@ -27,7 +27,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, object_session
 
-from app import gmail
+from app import gmail, whatsapp
 from app.background import Background
 from app.config import settings
 from app.db import Base, SessionLocal, engine, get_session
@@ -835,6 +835,7 @@ def download_excel(year: str | None = Query(None, description="Financial year li
 
 
 app.include_router(api)
+app.include_router(whatsapp.router)
 
 
 # ---------- Composio webhook (production delivery of new-email events)

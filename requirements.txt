@@ -11,6 +11,7 @@ pymupdf
 composio
 openpyxl
 httpx
+twilio>=9.0
 anyio
 python-docx
 numpy

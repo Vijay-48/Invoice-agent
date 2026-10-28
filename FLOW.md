@@ -137,6 +137,24 @@ Nothing reads the document here. It now waits in the queue for section 4.
    - `gmail_health.record(OK)`
    - `_remove_other_triggers`
 
+### 3e. A WhatsApp message arrives (Twilio): `POST /api/v1/webhook/whatsapp`
+
+1. The router dependency `whatsapp.verify_twilio_signature` checks `X-Twilio-Signature` against
+   `PUBLIC_BASE_URL` + path + form fields with `TWILIO_AUTH_TOKEN`. If the check fails (or no token is
+   set), the request gets 403 before any field is parsed.
+2. `whatsapp.incoming_message` (sync, on a thread) logs metadata only, then
+   `sender_user_id` → `parse_senders(WHATSAPP_SENDERS)` → `user_exists`. An unknown sender is ignored.
+3. It answers Twilio at once with empty TwiML. For a known sender with media, a FastAPI background
+   task runs **`download_all`** after the reply:
+   - for each `MediaUrl<i>`: `download_media`, which checks the account/message SIDs, the type and
+     `check_media_url`, then `fetch`. That sends credentials only to `api.twilio.com`, follows
+     redirects by hand to allowed hosts, and enforces the size limit and the 60 s deadline. Then
+     `content_matches` checks the bytes.
+   - `ingest_media` → `ingest.ingest_document(source="whatsapp", source_ref="<MessageSid>/<MediaSid>")`
+     in its own session (section 2's dedupe)
+   - one failed attachment is logged (reason or exception class only) and the next one carries on
+4. From here it is section 4. There is no reply to the sender and no retry of a failed download.
+
 ## 4. The worker reads a document: `worker.run` (one loop per worker thread)
 
 ```
@@ -318,7 +336,19 @@ The Python locks are per process. That is one reason the API must run as one pro
 
 ---
 
-## You are here (2026-10-26, after the workbook split)
+## You are here (2026-10-28, WhatsApp channel added)
+
+### WhatsApp through Twilio (D-97; 341 tests pass)
+
+- New entry path §3e: Twilio webhook → signature → sender mapping → media download after the reply →
+  `ingest_document`. Everything after ingest (§4, §5, Excel) is unchanged.
+- Ported unchanged from the earlier Twilio build (`Terasoft/app/whatsapp.py`); wired in by
+  `app.include_router(whatsapp.router)` and three settings (`TWILIO_AUTH_TOKEN`, `TWILIO_ACCOUNT_SID`,
+  `WHATSAPP_SENDERS`).
+- Not on the path yet: replies or status messages to the sender, a WhatsApp message log, retrying a
+  failed download, and .zip/.eml over WhatsApp.
+
+## Earlier: 2026-10-26, after the workbook split
 
 ### Workbook per financial year (D-96; 231 tests pass)
 

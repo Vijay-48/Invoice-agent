@@ -43,7 +43,7 @@ class Invoice(Base):
     __tablename__ = "invoices"
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)  # uploader / inbox owner
-    source: Mapped[str] = mapped_column(String(20))                   # upload | gmail
+    source: Mapped[str] = mapped_column(String(20))                   # upload | gmail | whatsapp
     source_ref: Mapped[str | None] = mapped_column(String(255), index=True)  # gmail: "<message id>/<file name>"
     sender: Mapped[str | None] = mapped_column(String(255))           # gmail: From header
     email_subject: Mapped[str | None] = mapped_column(String(500))

@@ -317,6 +317,22 @@ for 5 test invoices.
 
 ---
 
+**21. Someone who knows your webhook URL POSTs a WhatsApp-shaped form with a `MediaUrl0` pointing at
+their own server, from a number listed in `WHATSAPP_SENDERS`. What stops them, and in what order?** [§3e, D-97]
+<details><summary>Answer</summary>
+
+1. `verify_twilio_signature` runs first, as a router dependency. Without `TWILIO_AUTH_TOKEN` they can't
+   produce a valid `X-Twilio-Signature`, so they get 403 before any field (or sender) is even looked at.
+2. Even a correctly signed request is checked further. `download_media` requires our `AccountSid` and a
+   real `MessageSid`. `check_media_url` accepts only `https://api.twilio.com/...` for that account and
+   message. Redirects go only to Twilio/AWS hosts, without credentials. The bytes must match the
+   announced type.
+3. Only then does `ingest_document` store the file. A file sent again is deduplicated by hash.
+
+Also: if `PUBLIC_BASE_URL` doesn't exactly match the URL in the Twilio Console (e.g. a new ngrok
+address), even real Twilio requests fail the signature check. Every message gets 403.
+</details>
+
 ## Level 5: Explain it back (no single right answer: check yourself against the code)
 
 **Export safety check (2026-10-16): A supplier name starts with `=1+1`, or whitespace followed by

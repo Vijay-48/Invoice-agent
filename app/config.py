@@ -82,5 +82,16 @@ class Settings(BaseSettings):
     report_sender_user_id: int = 0               # whose Gmail sends it; 0 = the first connected user
     report_app_url: str = ""                     # the frontend's address, for links in the email
 
+    # WhatsApp through Twilio: every webhook request must carry a valid X-Twilio-Signature.
+    # Empty token = every WhatsApp request is rejected. Twilio signs the public URL, so
+    # public_base_url must match the webhook URL set in the Twilio Console exactly.
+    twilio_auth_token: str = ""
+    # Your Twilio Account SID (AC...): media is downloaded only for this account, with these
+    # credentials. Empty = media is never downloaded.
+    twilio_account_sid: str = ""
+    # Who may send invoices on WhatsApp: "number:user_id", comma-separated, e.g.
+    # "+919876543210:1,+14155550100:2". Messages from any other number are ignored.
+    whatsapp_senders: str = ""
+
 
 settings = Settings()

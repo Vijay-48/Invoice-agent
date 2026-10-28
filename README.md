@@ -153,6 +153,25 @@ The listener also catches up on emails that arrived while it was stopped.
   a few minutes late even if live events stop. Check it with `GET /api/v1/gmail/status` (shown on
   the demo's Gmail screen): connected or not, last event, last sync, reconnects, last error.
 
+## WhatsApp (Twilio)
+
+Invoices sent on WhatsApp to your Twilio number are processed like uploads.
+
+1. In `.env` set `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` and `WHATSAPP_SENDERS` (who may send, and
+   whose invoices they become: `+919876543210:1,+14155550100:2`). Messages from other numbers are ignored.
+2. Expose the server over HTTPS (in development: `ngrok http 8000`), and set `PUBLIC_BASE_URL` to that
+   address.
+3. In the Twilio Console (WhatsApp sandbox or sender → "When a message comes in"), set
+   `PUBLIC_BASE_URL/api/v1/webhook/whatsapp`, method POST. It must match `PUBLIC_BASE_URL` exactly:
+   Twilio signs the URL, and a mismatch makes every request fail with 403.
+4. Restart the server.
+
+Each PDF, image, Excel, CSV or Word attachment (up to 10 per message, `MAX_UPLOAD_MB` each) becomes
+its own invoice with source `whatsapp`; the same file sent again keeps one record. Every request's
+Twilio signature is checked; media is downloaded only from Twilio, for your account. Nothing is sent
+back to the sender. Text-only messages, .zip files and unsupported types are only logged (number
+masked, text never logged).
+
 ## AI assistant
 
 `POST /api/v1/assistant/chat` (and the **Assistant** screen in the demo) answers questions about the
@@ -322,6 +341,7 @@ Composio are faked, so no keys are used. Other database:
     app/gmail.py             Composio: connect, trigger, read emails, download attachments
     app/gmail_listener.py    receives Composio events (websocket, or webhook in production)
     app/gmail_health.py      expired/revoked Gmail access: check, show, alert
+    app/whatsapp.py          WhatsApp via Twilio: signed webhook, sender mapping, media download -> ingest
     app/background.py        starts/stops the worker and Gmail listener with the API
     app/worker.py            Postgres queue (SKIP LOCKED) + Excel retries
     app/pipeline/reading.py  reading a document: AI, e-invoice QR, second reading (worker + evaluation)

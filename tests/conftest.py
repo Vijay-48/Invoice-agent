@@ -20,6 +20,11 @@ os.environ.update({
     "COMPOSIO_API_KEY": "ak_test",
     "GMAIL_QUERY": "has:attachment",
     "GMAIL_SUBJECT_KEYWORDS": "",
+    "PUBLIC_BASE_URL": "http://localhost:8000",
+    # WhatsApp (Twilio): the real token, account and senders are never used
+    "TWILIO_AUTH_TOKEN": "",
+    "TWILIO_ACCOUNT_SID": "",
+    "WHATSAPP_SENDERS": "",
     # Tests drive the worker by hand; test_background.py turns these on
     "RUN_WORKER": "false",
     "RUN_GMAIL_LISTENER": "false",
