@@ -70,19 +70,21 @@ def normalize_extracted(data: ExtractedInvoice) -> ExtractedInvoice:
     })
 
 
-CONFUSABLE = str.maketrans({"O": "0", "D": "0", "Q": "0", "I": "1", "L": "1", "S": "5", "B": "8", "Z": "2", "G": "6"})
+CONFUSABLE_FROM, CONFUSABLE_TO = "ODQILSBZG", "000115826"
+CONFUSABLE = str.maketrans(CONFUSABLE_FROM, CONFUSABLE_TO)
 
 
 def _look_alike_numbers(session: Session, inv: Invoice, same_supplier, no_norm: str, fy: int) -> list[Invoice]:
     """Other invoices from the supplier whose number differs only by characters that are easily
-    misread (0/O, 1/I, 5/S, 8/B...): possibly the same invoice read twice in different ways."""
-    key = no_norm.translate(CONFUSABLE)
+    misread (0/O, 1/I, 5/S, 8/B...): possibly the same invoice read twice in different ways.
+    Compared in the database (Postgres translate): a supplier's numbers usually all have the same
+    length, so filtering in Python loaded every invoice of the supplier (D-95)."""
+    key = no_norm[:100].translate(CONFUSABLE)
     candidates = session.scalars(select(Invoice).where(
         Invoice.id != inv.id, same_supplier, Invoice.invoice_no_norm != no_norm[:100],
-        func.length(Invoice.invoice_no_norm) == len(no_norm[:100]), Invoice.status.not_in(NOT_COMPARED),
-        journal_doc_type() != "journal_entry").order_by(Invoice.id)).all()
-    return [o for o in candidates if (o.invoice_no_norm or "").translate(CONFUSABLE) == key
-            and ((d := parse_date(o.invoice_date)) is None or financial_year(d) == fy)]
+        func.translate(Invoice.invoice_no_norm, CONFUSABLE_FROM, CONFUSABLE_TO) == key,
+        Invoice.status.not_in(NOT_COMPARED), journal_doc_type() != "journal_entry").order_by(Invoice.id)).all()
+    return [o for o in candidates if (d := parse_date(o.invoice_date)) is None or financial_year(d) == fy]
 
 
 def parse_date(s: str | None) -> date | None:
@@ -119,7 +121,45 @@ def arithmetic_checks(data: ExtractedInvoice) -> list[Check]:
                        ("tax_amount", expected_tax, actual_tax),
                        ("grand_total", computed_total, data.grand_total)]:
         checks.append(Check(name, PASS if _close(a, b) else FAIL, f"expected {a:.2f}, got {b:.2f}"))
+    checks += hsn_summary_checks(data, actual_tax)
     return checks
+
+
+def _digits(s: str | None) -> str:
+    return re.sub(r"\D", "", s or "")
+
+
+def hsn_summary_checks(data: ExtractedInvoice, actual_tax: float) -> list[Check]:
+    """The HSN-wise tax summary printed on many invoices is a second set of totals: it must agree with
+    the line items (per HSN) and with the invoice's taxable total and taxes. A misread digit in either
+    place shows up here. No summary printed = no check."""
+    rows = data.hsn_summary
+    if not rows:
+        return []
+    problems: list[str] = []
+    summary_taxable = sum(r.taxable_value for r in rows)
+    summary_tax = sum(r.tax_amount for r in rows)
+    if not _close(summary_taxable, data.taxable_total):
+        problems.append(f"HSN summary taxable {summary_taxable:.2f} vs invoice {data.taxable_total:.2f}")
+    if not _close(summary_tax, actual_tax):
+        problems.append(f"HSN summary tax {summary_tax:.2f} vs invoice {actual_tax:.2f}")
+    # One HSN can have several summary rows (one per GST rate): compared as their sum
+    by_code: dict[str, float] = {}
+    for row in rows:
+        if code := _digits(row.hsn_sac):
+            by_code[code] = by_code.get(code, 0.0) + row.taxable_value
+    for code, summary_taxable_code in by_code.items():
+        # A summary may list 4 digits where the lines show 8: one is a prefix of the other
+        matching = [l for l in data.lines if _digits(l.hsn_sac)
+                    and (_digits(l.hsn_sac).startswith(code) or code.startswith(_digits(l.hsn_sac)))]
+        if not matching:
+            continue
+        line_taxable = sum(l.taxable_value for l in matching)
+        if not _close(line_taxable, summary_taxable_code):
+            problems.append(f"HSN {code}: lines add up to {line_taxable:.2f}, summary says {summary_taxable_code:.2f}")
+    if problems:
+        return [Check("hsn_summary", FAIL, "; ".join(problems))]
+    return [Check("hsn_summary", PASS, f"{len(rows)} HSN row(s) agree with the lines and totals")]
 
 
 @dataclass

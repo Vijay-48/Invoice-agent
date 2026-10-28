@@ -90,7 +90,7 @@ def test_read_excel(data, session):
     session.commit()
     export_pending(session)
     r = j(T.read_excel())
-    assert r["matching_rows"] == 2 and r["totals"]["Grand Total"] == 12272 and r["download_url"] == "/api/v1/excel"
+    assert r["matching_rows"] == 2 and r["totals"]["Grand Total"] == 12272 and r["download_url"] == "/api/v1/excel?year=2026-27" and r["year"] == "2026-27"
     assert j(T.read_excel(search="bangalore"))["matching_rows"] == 1
     assert j(T.read_excel(sheet="Line Items"))["matching_rows"] == 4
     assert "sheets" in j(T.read_excel(sheet="Nope"))

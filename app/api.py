@@ -31,7 +31,7 @@ from app import gmail
 from app.background import Background
 from app.config import settings
 from app.db import Base, SessionLocal, engine, get_session
-from app.excel import try_export
+from app.excel import find_workbook, list_workbooks, try_export
 from app.logs import setup_logging
 from app.documents import PDF_LOCK, expand
 from app.ingest import ingest_document, is_accepted
@@ -39,6 +39,7 @@ from app import chat_store
 from app.models import (Invoice, AuditLog, ChatMessage, ChatSession, EmailMessage, PdfPassword, User, Status,
                         audit)
 from app.pipeline.evaluate import evaluate
+from app.pipeline.supplier import list_suppliers
 from app.schemas import InvoiceCorrection, from_stored
 
 
@@ -272,6 +273,14 @@ def get_email(email_id: int, session: Session = Depends(get_session)):
     return {**serialize_email(e, _statuses(session, [e])), "body_snippet": e.body_snippet}
 
 
+# ---------- suppliers (built from approved invoices)
+
+@api.get("/suppliers")
+def suppliers(session: Session = Depends(get_session)):
+    """Every supplier with approved invoices: what they usually bill, for the reviewer's context."""
+    return list_suppliers(session)
+
+
 # ---------- invoices
 
 def serialize(inv: Invoice) -> dict:
@@ -409,7 +418,7 @@ def approve(invoice_id: int, body: Review = Review(), user: User = Depends(curre
     inv.approved_at = datetime.now(timezone.utc)
     inv.status_reason = f"Approved by {user.name}"
     session.commit()
-    error = try_export(session)
+    error = try_export(session, wait=False)   # an export already running writes it within seconds
     session.refresh(inv)
     return {**serialize(inv), "excel_error": error}
 
@@ -790,13 +799,27 @@ def system_status(session: Session = Depends(get_session)):
     }
 
 
+@api.get("/excel/workbooks")
+def excel_workbooks():
+    """The workbooks there are: one per financial year (newest first), plus the single workbook from
+    before the split, if any (year null)."""
+    return [{"year": w["year"], "file": w["file"], "size_bytes": w["path"].stat().st_size,
+             "download_url": f"/api/v1/excel?year={w['year']}" if w["year"] else "/api/v1/excel?year=all"}
+            for w in list_workbooks()]
+
+
 @api.get("/excel")
-def download_excel(session: Session = Depends(get_session)):
-    """The workbook of approved invoices."""
+def download_excel(year: str | None = Query(None, description="Financial year like 2026-27; "
+                                                                  "'all' = the single workbook from before the split"),
+                   session: Session = Depends(get_session)):
+    """The workbook of approved invoices: this financial year's (or the newest) unless `year` says which."""
     error = try_export(session)   # include anything approved a moment ago
-    path = Path(settings.excel_path)
-    if not path.exists():
-        raise HTTPException(404, error or "No approved invoices yet")
+    try:
+        path = Path(settings.excel_path) if year == "all" else find_workbook(year)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    if path is None or not path.exists():
+        raise HTTPException(404, error or (f"No workbook for {year}" if year else "No approved invoices yet"))
     # Read in one go (not streamed from disk): the worker may replace the workbook while it is
     # being sent, and a streamed file would then arrive cut off
     for attempt in range(5):

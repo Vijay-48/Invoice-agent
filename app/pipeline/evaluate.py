@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import AuditLog, Invoice, Status, audit
-from app.pipeline import einvoice, journal
+from app.pipeline import einvoice, journal, supplier
 from app.pipeline.checks import Check, WARN
 from app.pipeline.decide import decide, RULES_VERSION
 from app.pipeline.validate import validate, normalize_extracted, normalize_invoice_no, parse_date
@@ -48,7 +48,8 @@ def evaluate(session: Session, inv: Invoice, data: ExtractedInvoice, *, actor: s
         checked = data.is_invoice or data.looks_like_invoice
         result = validate(session, inv, data) if checked else None
         if result is not None:
-            result.checks += journal.check_invoice_against_journals(session, inv, data) + (extra_checks or [])
+            result.checks += (journal.check_invoice_against_journals(session, inv, data)
+                              + supplier.check_supplier(session, inv, data) + (extra_checks or []))
             status, reason = decide(data, result)
             inv.checks = [c.dict() for c in result.checks]
             inv.duplicate_of_id = result.duplicate_of
@@ -99,7 +100,9 @@ def _carried_checks(session: Session, inv: Invoice, data: ExtractedInvoice) -> l
     return carried
 
 
-def pages_check(pages: int, max_pages: int) -> list[Check]:
+def pages_check(pages: int, max_pages: int, read: list[int] | None = None) -> list[Check]:
+    """`read`: the page numbers (1-based) that were sent to the AI, when not simply the first ones."""
     if pages > max_pages:
-        return [Check("pages", WARN, f"Only the first {max_pages} of {pages} pages were read")]
+        which = f"pages {', '.join(map(str, read))}" if read else f"the first {max_pages}"
+        return [Check("pages", WARN, f"Only {which} of {pages} pages were read: check nothing is missing")]
     return []

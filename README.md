@@ -13,7 +13,7 @@ Gmail ──────┘   (Composio trigger)                                
                               APPROVED ("auto")        NEEDS_REVIEW          NOT_INVOICE / DUPLICATE
                                      │              user corrects, approves
                                      ▼                       │
-                           output/invoices.xlsx  <───────────┘
+                    output/invoices FY2026-27.xlsx  <──────┘
 ```
 
 **Written to Excel without approval** when the document is a tax invoice and every
@@ -92,7 +92,7 @@ Review a doubtful invoice: fix fields (checks run again), then approve or reject
     curl -X POST localhost:8000/api/v1/invoices/1/reject  -H "X-User-Id: 1"
     curl -X POST localhost:8000/api/v1/invoices/1/reprocess -H "X-User-Id: 1"   # run the AI again
 
-Download the workbook: `GET /api/v1/excel` (or open `output/invoices.xlsx`).
+Download the workbook: `GET /api/v1/excel` (this financial year's; `?year=2025-26` for another, `GET /api/v1/excel/workbooks` lists them), or open `output/invoices FY2026-27.xlsx`.
 
 ### Connect a user's Gmail
 
@@ -209,7 +209,8 @@ numbers come from the database, not the AI. It is sent from a connected Gmail ac
 
 ## Excel workbook
 
-`output/invoices.xlsx` (`EXCEL_PATH`):
+One workbook per financial year (April–March, by invoice date): `output/invoices FY2026-27.xlsx`, next to
+`EXCEL_PATH`. Set `EXCEL_PER_FINANCIAL_YEAR=false` for the single `EXCEL_PATH` workbook. Each has:
 
 - **Invoices**: one row per invoice: supplier, GSTINs, number, date, taxable value,
   CGST/SGST/IGST, round off, total, approved by (`auto` or the user), source, sender, user, file.
@@ -217,7 +218,7 @@ numbers come from the database, not the AI. It is sent from a connected Gmail ac
 
 If the file is open in Excel when an invoice is approved, it can't be saved: the
 invoice stays `APPROVED` and is written as soon as the file is closed (the worker
-retries every few seconds). Rows are never written twice.
+retries every few seconds). Only that year's invoices wait; other years are written. Rows are never written twice.
 
 ## Many users at once
 

@@ -318,7 +318,60 @@ The Python locks are per process. That is one reason the API must run as one pro
 
 ---
 
-## You are here (2026-10-16, after audit fix batch 1)
+## You are here (2026-10-26, after the workbook split)
+
+### Workbook per financial year (D-96; 231 tests pass)
+
+- §4.3 export: `excel.export_pending` groups the APPROVED invoices by `workbook_for` (financial year of the
+  invoice date) and writes each group with `_write_workbook` into `invoices FY<year>.xlsx`. A workbook open
+  in Excel only holds back its own year (`ExcelLocked` raised after the others are committed).
+- Download: `GET /api/v1/excel[?year=2026-27|all]`, `GET /api/v1/excel/workbooks`; the assistant's
+  `read_excel(year=...)`.
+- Real run: 2 users × 9 scenarios with the real AI, 18/18 expected outcomes, all in `invoices FY2026-27.xlsx`.
+- This removes the main scale limit from D-95 until a single year gets very busy; the full fix is still
+  Phase 5 (database register).
+
+## Earlier the same day: review of D-92…D-94 with real runs and load tests
+
+### Review and load test (D-95; 226 tests pass)
+
+- Real runs: golden set 100% key fields, 0 wrong auto-approvals; 2 simulated users × 9 scenarios through
+  the API with the real AI: 18/18 expected outcomes, read in 40 s.
+- Changes on the paths:
+  - §4.2.4 `extract.extract_invoice` drops an HSN summary the text doesn't show (the AI invents one).
+  - `reading` won't accept a second reading that only rewrites or drops the summary.
+  - §4.2.6 `validate._look_alike_numbers` and `supplier.profile` run in SQL.
+  - §4.3 `excel.export_pending(wait=False)` for workers and Approve; `_append` no longer rescans the sheet.
+  - The assistant's summary tools read only the columns they need.
+- Measured at 50,000 invoices (20,000 from one supplier):
+
+  | Path | Before | After |
+  |---|---|---|
+  | Supplier check, per document | 4.7 s | 0.07 s |
+  | Duplicate + look-alike check, per document | 4.6 s | 0.09 s |
+  | First Excel export of 1,000 invoices | 323 s | 8 s |
+  | Assistant statistics / supplier summary | ~43 s, ~1 GB | 1–4 s, < 60 MB |
+
+- Weak spot left on the path: §4.3. Every export loads and saves the whole workbook, 37 s per export at
+  3,000 invoices and growing. Needs the D-01 decision: workbook per financial year, or database register.
+
+### Roadmap items built earlier today (D-92, D-93, D-94)
+
+Three additions on the paths above:
+
+- §4.2.4 reading: the AI now also returns the HSN-wise tax summary. `validate.arithmetic_checks` adds an
+  `hsn_summary` check (summary vs lines vs totals).
+- §4.2.1 page choice: `extract.prepare_pages` uses `select_pages` for PDFs over `MAX_PAGES`: first page,
+  last page and the pages with most amounts. The `pages` check says which pages were read.
+- §4.2.6 checks: `evaluate.evaluate` also calls `supplier.check_supplier`, which compares the invoice with
+  the supplier's approved invoices (name on the GSTIN, amount far above the usual). New API:
+  `GET /api/v1/suppliers`.
+- Still open from the roadmap: the ones that need you (GSP account, PO/GRN source, OCR service, hosting,
+  login/multi-company decisions). Edits with an audit trail already existed (`PATCH /invoices/{id}`).
+
+(The 2026-10-16 audit status follows, unchanged.)
+
+## 2026-10-16, after audit fix batch 1
 
 ### What has happened
 

@@ -18,11 +18,12 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
-from sqlalchemy import func, or_, select
+from sqlalchemy import Numeric, case, cast, func, or_, select
+from sqlalchemy.dialects.postgresql import JSONB
 
 from app.config import settings
 from app.db import SessionLocal
-from app.excel import _safe
+from app.excel import _safe, find_workbook, list_workbooks
 from app.models import AuditLog, EmailMessage, Invoice, Status, User
 
 MAX_ROWS = 50
@@ -91,6 +92,15 @@ def _filtered(session, text="", status="", supplier="", document_type="", date_f
     return q
 
 
+def _columns(q, fields: list[str] = ()):
+    """`q` (from _filtered) reading only the columns the summaries use, plus the named values from the
+    stored extraction: whole Invoice rows carry every line item, ~1 GB and 40 s for 50,000 invoices (D-95)."""
+    return q.with_only_columns(
+        Invoice.id, Invoice.status, Invoice.supplier_name, Invoice.supplier_gstin, Invoice.source,
+        Invoice.invoice_date, Invoice.grand_total,
+        *[Invoice.extracted[f].astext.label(f) for f in fields])
+
+
 # ---------- tools
 
 def search_invoices(text: str = "", status: str = "", supplier: str = "", document_type: str = "",
@@ -155,9 +165,12 @@ def invoice_statistics(group_by: str = "status", date_from: str = "", date_to: s
     documents are left out unless `status` asks for them. Amounts in another currency than INR get
     their own groups (e.g. "Supplier X (USD)"). Optional filters: invoice date range (YYYY-MM-DD),
     status (comma-separated), supplier."""
+    if group_by == "gst_rate":
+        return _statistics_by_gst_rate(status=status, supplier=supplier, date_from=date_from, date_to=date_to)
+    fields = ["document_type", "currency", "taxable_total", "cgst", "sgst", "igst"]   # grand_total: the column
     with SessionLocal() as s:
-        rows = s.scalars(_filtered(s, status=status, supplier=supplier, date_from=date_from,
-                                   date_to=date_to)).all()
+        rows = s.execute(_columns(_filtered(s, status=status, supplier=supplier, date_from=date_from,
+                                            date_to=date_to), fields)).all()
     excluded = 0
     if not status:
         excluded = sum(1 for inv in rows if inv.status in NOT_COUNTED)
@@ -165,42 +178,67 @@ def invoice_statistics(group_by: str = "status", date_from: str = "", date_to: s
     groups: dict = defaultdict(lambda: {"count": 0, "taxable": 0.0, "cgst": 0.0, "sgst": 0.0, "igst": 0.0,
                                         "grand_total": 0.0})
     for inv in rows:
-        d = inv.extracted or {}
-        sign = -1 if d.get("document_type") == "credit_note" else 1
-        if group_by == "gst_rate":
-            for line in d.get("lines") or []:
-                g = groups[f"{_num(line.get('gst_rate')):g}%"]
-                g["count"] += 1
-                g["taxable"] += sign * _num(line.get("taxable_value"))
-                g["grand_total"] += sign * _num(line.get("taxable_value")) * (1 + _num(line.get("gst_rate")) / 100)
-            continue
+        sign = -1 if inv.document_type == "credit_note" else 1
         key = {"status": inv.status, "supplier": inv.supplier_name or "(unknown)", "source": inv.source,
-               "month": (inv.invoice_date or "unknown")[:7], "document_type": d.get("document_type") or "unknown",
+               "month": (inv.invoice_date or "unknown")[:7], "document_type": inv.document_type or "unknown",
                }.get(group_by, inv.status)
-        currency = (d.get("currency") or "INR").upper()
+        currency = (inv.currency or "INR").upper()
         g = groups[key if currency == "INR" else f"{key} ({currency})"]
         g["count"] += 1
         for k, field in (("taxable", "taxable_total"), ("cgst", "cgst"), ("sgst", "sgst"), ("igst", "igst"),
                          ("grand_total", "grand_total")):
-            g[k] += sign * _num(d.get(field))
+            g[k] += sign * _num(getattr(inv, field))
     out = [{"group": k, **{f: round(v, 2) if isinstance(v, float) else v for f, v in g.items()}}
            for k, g in sorted(groups.items(), key=lambda kv: -abs(kv[1]["grand_total"]))]
     return _json({"group_by": group_by, "documents": len(rows), "left_out_duplicates_rejected_etc": excluded,
                   "groups": out[:MAX_ROWS]})
 
 
-def read_excel(sheet: str = "Invoices", search: str = "", limit: int = 30) -> str:
-    """Read the Excel workbook of approved invoices (output/invoices.xlsx) exactly as it is on disk.
+def _statistics_by_gst_rate(status: str, supplier: str, date_from: str, date_to: str) -> str:
+    """invoice_statistics(group_by="gst_rate"), summed in the database over the stored line items: in Python
+    every line of every invoice was loaded (~800 MB for 50,000 invoices of 30 lines, D-95)."""
+    with SessionLocal() as s:
+        q = _filtered(s, status=status, supplier=supplier, date_from=date_from, date_to=date_to)
+        if not status:
+            excluded = s.scalar(q.with_only_columns(func.count()).where(Invoice.status.in_(NOT_COUNTED)))
+            q = q.where(Invoice.status.not_in(NOT_COUNTED))
+        else:
+            excluded = 0
+        documents = s.scalar(q.with_only_columns(func.count()))
+        sign = case((Invoice.extracted["document_type"].astext == "credit_note", -1), else_=1)
+        lines = q.with_only_columns(sign.label("sign"), func.jsonb_array_elements(
+            func.coalesce(Invoice.extracted["lines"], cast("[]", JSONB)), type_=JSONB).label("line")).subquery()
+        rate = func.coalesce(lines.c.line["gst_rate"].astext.cast(Numeric), 0)
+        taxable = lines.c.sign * func.coalesce(lines.c.line["taxable_value"].astext.cast(Numeric), 0)
+        rows = s.execute(select(rate, func.count(), func.sum(taxable), func.sum(taxable * (1 + rate / 100)))
+                         .group_by(rate)).all()
+    out = [{"group": f"{float(r):g}%", "count": n, "taxable": round(float(t or 0), 2), "cgst": 0.0, "sgst": 0.0,
+            "igst": 0.0, "grand_total": round(float(g or 0), 2)} for r, n, t, g in rows]
+    out.sort(key=lambda g: -abs(g["grand_total"]))
+    return _json({"group_by": "gst_rate", "documents": documents, "left_out_duplicates_rejected_etc": excluded,
+                  "groups": out[:MAX_ROWS]})
+
+
+def read_excel(sheet: str = "Invoices", search: str = "", limit: int = 30, year: str = "") -> str:
+    """Read an Excel workbook of approved invoices exactly as it is on disk. There is one workbook per
+    financial year (April-March, by invoice date).
 
     Args:
         sheet: "Invoices" (one row per invoice) or "Line Items" (one row per item).
         search: only rows containing this text in any cell (case-insensitive).
         limit: rows to return (max 50).
-    Returns headers, matching rows, totals of the amount columns over ALL matching rows, and a
-    download_url for the workbook."""
-    path = Path(settings.excel_path)
-    if not path.exists():
-        return _json({"error": "The Excel workbook doesn't exist yet: no invoice has been approved."})
+        year: financial year like "2026-27"; empty = the current one (or the newest there is).
+    Returns the workbook's year, headers, matching rows, totals of the amount columns over ALL matching
+    rows, the other years available, and a download_url for the workbook."""
+    try:
+        path = find_workbook(year.strip() or None)
+    except ValueError as e:
+        return _json({"error": str(e)})
+    years = [w["year"] for w in list_workbooks() if w["year"]]
+    if path is None:
+        return _json({"error": f"No Excel workbook for {year}." if year.strip() else
+                      "The Excel workbook doesn't exist yet: no invoice has been approved.", "years": years})
+    shown_year = next((w["year"] for w in list_workbooks() if w["path"] == path), None)
     # Read from memory: an open file handle would stop the worker from replacing the workbook (Windows)
     wb = load_workbook(io.BytesIO(path.read_bytes()), read_only=True, data_only=True)
     if sheet not in wb.sheetnames:
@@ -221,9 +259,11 @@ def read_excel(sheet: str = "Invoices", search: str = "", limit: int = 30) -> st
         if isinstance(v, datetime):
             return v.date().isoformat() if (v.hour, v.minute, v.second) == (0, 0, 0) else v.isoformat(" ", "minutes")
         return v
-    return _json({"sheet": sheet, "headers": headers, "matching_rows": len(data), "totals": totals,
+    return _json({"year": shown_year, "other_years": [y for y in years if y != shown_year], "sheet": sheet,
+                  "headers": headers, "matching_rows": len(data), "totals": totals,
                   "rows": [dict(zip(headers, map(cell, r))) for r in data[:min(max(limit, 1), MAX_ROWS)]],
-                  "download_url": f"{API}/excel"})
+                  "download_url": f"{API}/excel" + (f"?year={shown_year}" if shown_year else ""),
+                  "file_name": path.name})
 
 
 def list_emails(outcome: str = "", days: int = 7, limit: int = 30) -> str:
@@ -256,12 +296,14 @@ def needs_attention() -> str:
         for gstin, total in s.execute(select(Invoice.supplier_gstin, Invoice.grand_total).where(
                 Invoice.status == Status.EXPORTED, Invoice.supplier_gstin.is_not(None))):
             totals[gstin].append(_num(total))
-        for inv in s.scalars(select(Invoice).where(Invoice.status.in_([Status.NEEDS_REVIEW, Status.APPROVED,
-                                                                       Status.EXPORTED]),
-                                                   Invoice.supplier_gstin.is_not(None))):
-            past = [t for t in totals.get(inv.supplier_gstin, []) if t]
-            if len(past) >= 3 and _num(inv.grand_total) > 3 * statistics.median(past):
-                unusual.append({**summary(inv), "usual_amount": round(statistics.median(past), 2)})
+        medians = {g: statistics.median(p) for g, t in totals.items() if len(p := [x for x in t if x]) >= 3}
+        # Ids and amounts first (every invoice of every supplier); full records only for the ones shown
+        flagged = [(i, medians[g]) for i, g, total in s.execute(select(Invoice.id, Invoice.supplier_gstin,
+                   Invoice.grand_total).where(Invoice.status.in_([Status.NEEDS_REVIEW, Status.APPROVED, Status.EXPORTED]),
+                                              Invoice.supplier_gstin.is_not(None)).order_by(Invoice.id))
+                   if g in medians and _num(total) > 3 * medians[g]][:20]
+        for i, median in flagged:
+            unusual.append({**summary(s.get(Invoice, i)), "usual_amount": round(median, 2)})
         failed_emails = s.scalars(select(EmailMessage).where(EmailMessage.outcome == "failed")
                                   .order_by(EmailMessage.received_at.desc()).limit(10)).all()
         return _json({
@@ -277,7 +319,7 @@ def supplier_summary(supplier: str = "") -> str:
     first and last invoice date, and the statuses of their documents. `supplier`: part of a name or GSTIN
     to look at one supplier; empty for all (largest first)."""
     with SessionLocal() as s:
-        rows = s.scalars(_filtered(s, supplier=supplier).where(Invoice.supplier_name.is_not(None))).all()
+        rows = s.execute(_columns(_filtered(s, supplier=supplier).where(Invoice.supplier_name.is_not(None)))).all()
     out: dict = defaultdict(lambda: {"gstins": set(), "documents": 0, "exported_total": 0.0, "in_review_total": 0.0,
                                      "first_invoice": None, "last_invoice": None, "statuses": defaultdict(int)})
     for inv in rows:

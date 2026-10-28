@@ -133,7 +133,7 @@ def process(invoice_id: int) -> bool:
                     f"fixed {', '.join(reading.second_pass['fixed'])}" if reading.second_pass["fixed"]
                     else "same problems, first reading kept"), reading.second_pass)
             total_pages = data._usage.get("pages") or page_count(inv.file_path)
-            pages = pages_check(total_pages, settings.max_pages)
+            pages = pages_check(total_pages, settings.max_pages, data._usage.get("read_pages"))
             evaluate(session, inv, data, extra_checks=pages + reading.checks)
             _ai_ok()
             inv.error = None
@@ -193,9 +193,10 @@ def export_loop(stop: threading.Event) -> None:
         stop.wait(10)
 
 
-def export() -> None:
+def export(wait: bool = False) -> None:
+    """Worker threads don't wait for an export another thread is running (it writes theirs too)."""
     with SessionLocal() as session:
-        try_export(session)
+        try_export(session, wait)
 
 
 def run(stop: threading.Event, write_excel: bool = True) -> None:

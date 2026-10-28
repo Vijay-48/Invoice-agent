@@ -1,7 +1,12 @@
-"""Excel output: APPROVED invoices are appended to one workbook, then marked EXPORTED.
+"""Excel output: APPROVED invoices are appended to a workbook, then marked EXPORTED.
 
     Invoices     one row per invoice
     Line Items   one row per item, linked by Invoice ID
+
+One workbook per financial year (April to March) of the invoice date, e.g. "invoices FY2026-27.xlsx"
+next to EXCEL_PATH (D-96): every export loads and saves the whole workbook, so a single file growing
+forever made each export slower (37 s at 3,000 invoices, D-95). EXCEL_PER_FINANCIAL_YEAR=false keeps
+the single EXCEL_PATH workbook.
 
 The workbook is written to a temp file and swapped in, so a crash never leaves a
 half-written file. If Excel has the file open, Windows refuses the swap: the invoices
@@ -10,6 +15,8 @@ Rows already in the sheet (by Invoice ID) are never written twice.
 """
 import logging
 import os
+import re
+from collections import defaultdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -48,6 +55,65 @@ SHEETS = {"Invoices": INVOICE_COLUMNS, "Line Items": LINE_COLUMNS}
 
 class ExcelLocked(Exception):
     pass
+
+
+FY_RE = re.compile(r"^(\d{4})-(\d{2})$")   # "2026-27"
+
+
+def fy_label(d: date) -> str:
+    """Indian financial year of a date: 2026-04-01 .. 2027-03-31 -> "2026-27"."""
+    start = d.year if d.month >= 4 else d.year - 1
+    return f"{start}-{(start + 1) % 100:02d}"
+
+
+def workbook_path(fy: str | None = None) -> Path:
+    """The workbook of financial year `fy` ("2026-27"); the single EXCEL_PATH workbook when the
+    split is off or `fy` is None."""
+    base = Path(settings.excel_path)
+    if fy is None or not settings.excel_per_financial_year:
+        return base
+    return base.with_name(f"{base.stem} FY{fy}{base.suffix}")
+
+
+def workbook_for(inv: Invoice) -> Path:
+    """By invoice date, the date accountants file it under; no readable date: the approval date."""
+    try:
+        d = date.fromisoformat(inv.invoice_date) if inv.invoice_date else None
+    except ValueError:
+        d = None
+    d = d or (_local(inv.approved_at) or datetime.now()).date()
+    return workbook_path(fy_label(d))
+
+
+def list_workbooks() -> list[dict]:
+    """Workbooks on disk, newest financial year first; the single workbook (from before the split, or
+    with the split off) last, as year None."""
+    base = Path(settings.excel_path)
+    found = []
+    if base.parent.exists():
+        pattern = re.compile(re.escape(base.stem) + r" FY(\d{4}-\d{2})" + re.escape(base.suffix) + "$")
+        found = sorted(((m.group(1), p) for p in base.parent.iterdir() if (m := pattern.match(p.name))),
+                       reverse=True)
+    items = [{"year": fy, "file": p.name, "path": p} for fy, p in found]
+    if base.exists():
+        items.append({"year": None, "file": base.name, "path": base})
+    return items
+
+
+def find_workbook(year: str | None = None) -> Path | None:
+    """`year` "2026-27" -> that workbook; empty -> the current financial year's, else the newest there is."""
+    if year:
+        if not FY_RE.match(year):
+            raise ValueError(f"Financial year like 2026-27 expected, got '{year}'")
+        path = workbook_path(year)
+        return path if path.exists() else None
+    if not settings.excel_per_financial_year:
+        return workbook_path() if workbook_path().exists() else None
+    current = workbook_path(fy_label(date.today()))
+    if current.exists():
+        return current
+    books = list_workbooks()
+    return books[0]["path"] if books else None
 
 
 def _open_workbook(path: Path) -> Workbook:
@@ -90,7 +156,9 @@ def _safe(v):
 
 def _append(ws, columns, values):
     ws.append(values)
-    row = ws.max_row
+    # The row append() just wrote. Not ws.max_row: that scans every cell of the sheet, so each export got
+    # slower with the workbook's size (1,000 invoices of 30 lines took 5 minutes, D-95)
+    row = ws._current_row
     for i, (_, _w, fmt) in enumerate(columns, start=1):
         if fmt:
             ws.cell(row=row, column=i).number_format = fmt
@@ -140,24 +208,69 @@ def _rows(inv: Invoice, user: User | None):
     return [_safe(v) for v in invoice_row], [[_safe(v) for v in r] for r in line_rows]
 
 
-def export_pending(session: Session) -> int:
+def export_pending(session: Session, wait: bool = True) -> int:
     """Write every APPROVED invoice to the workbook and mark it EXPORTED.
-    Returns how many were exported. Raises ExcelLocked if the file is open in Excel."""
-    session.execute(text("SELECT pg_advisory_xact_lock(:ns, 0)"), {"ns": EXCEL_LOCK})
+    Returns how many were exported. Raises ExcelLocked if the file is open in Excel.
+    `wait=False`: when another export is running, return 0 at once; it (or the next one) writes these
+    too. Loading and saving the whole workbook takes seconds to minutes as it grows (D-95), and worker
+    threads or a reviewer's Approve click must not queue behind it."""
+    if wait:
+        session.execute(text("SELECT pg_advisory_xact_lock(:ns, 0)"), {"ns": EXCEL_LOCK})
+    elif not session.scalar(text("SELECT pg_try_advisory_xact_lock(:ns, 0)"), {"ns": EXCEL_LOCK}):
+        session.commit()
+        return 0
     pending = session.scalars(select(Invoice).where(Invoice.status == Status.APPROVED)
                               .order_by(Invoice.approved_at, Invoice.id)).all()
     if not pending:
         session.commit()
         return 0
-    log.info("Writing %d approved invoice(s) to %s: %s", len(pending), settings.excel_path,
-             [i.id for i in pending])
+    users = {u.id: u for u in session.scalars(select(User).where(User.id.in_({i.user_id for i in pending})))}
+    groups: dict[Path, list[Invoice]] = defaultdict(list)
+    for inv in pending:
+        groups[workbook_for(inv)].append(inv)
 
-    path = Path(settings.excel_path)
+    written: list[tuple[Invoice, Path]] = []
+    unwritable: list[tuple[Invoice, str]] = []
+    locked: list[str] = []
+    for path, invoices in groups.items():
+        # A workbook open in Excel holds back only its own year's invoices
+        try:
+            problems = _write_workbook(path, invoices, users)
+        except ExcelLocked as e:
+            locked.append(str(e))
+            continue
+        bad = {inv.id for inv, _ in problems}
+        unwritable += problems
+        written += [(inv, path) for inv in invoices if inv.id not in bad]
+    if locked and not written and not unwritable:
+        session.rollback()
+        raise ExcelLocked("; ".join(locked))
+
+    now = datetime.now(timezone.utc)
+    for inv, problem in unwritable:
+        inv.status = Status.NEEDS_REVIEW
+        inv.status_reason = f"Couldn't be written to Excel: {problem}"[:1000]
+        audit(session, inv.id, "export", inv.status_reason)
+    for inv, path in written:
+        inv.status = Status.EXPORTED
+        inv.exported_at = now
+        inv.error = None
+        audit(session, inv.id, "export", f"Written to {path.name}")
+    session.commit()
+    log.info("Exported %d invoice(s) to %s", len(written), ", ".join(sorted({p.name for _, p in written})) or "-")
+    if locked:   # the others are written; these wait, and try_export shows why
+        raise ExcelLocked("; ".join(locked))
+    return len(written)
+
+
+def _write_workbook(path: Path, pending: list[Invoice], users: dict[int, User]) -> list[tuple[Invoice, str]]:
+    """Append `pending` to the workbook at `path` (created if missing). Returns the invoices that can't
+    be written, with the reason. Raises ExcelLocked if the file is open in another program."""
+    log.info("Writing %d approved invoice(s) to %s: %s", len(pending), path, [i.id for i in pending])
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         wb = _open_workbook(path)
     except PermissionError as e:
-        session.rollback()
         raise ExcelLocked(f"{path} is open in another program") from e
     inv_ws, line_ws = wb["Invoices"], wb["Line Items"]
     # (Invoice ID, GSTIN, Invoice No) of the rows already written. The id alone isn't enough: after a
@@ -165,7 +278,6 @@ def export_pending(session: Session) -> int:
     already = {(row[0], _key(row[2]), _key(row[3])) for row in inv_ws.iter_rows(min_row=2, max_col=4, values_only=True)}
     ids_in_sheet = {k[0] for k in already}
 
-    users = {u.id: u for u in session.scalars(select(User).where(User.id.in_({i.user_id for i in pending})))}
     unwritable = []
     for inv in pending:
         if (inv.id, _key(inv.supplier_gstin), _key(inv.invoice_no)) in already:
@@ -193,40 +305,24 @@ def export_pending(session: Session) -> int:
         os.replace(tmp, path)
     except PermissionError as e:
         tmp.unlink(missing_ok=True)
-        session.rollback()
         raise ExcelLocked(f"{path} is open in another program; close it and it will be updated") from e
     except Exception:
         tmp.unlink(missing_ok=True)   # e.g. disk full: no half-written temp file left behind
         raise
-
-    now = datetime.now(timezone.utc)
-    for inv, problem in unwritable:
-        inv.status = Status.NEEDS_REVIEW
-        inv.status_reason = f"Couldn't be written to Excel: {problem}"[:1000]
-        audit(session, inv.id, "export", inv.status_reason)
-    bad = {inv.id for inv, _ in unwritable}
-    pending = [inv for inv in pending if inv.id not in bad]
-    for inv in pending:
-        inv.status = Status.EXPORTED
-        inv.exported_at = now
-        inv.error = None
-        audit(session, inv.id, "export", f"Written to {path.name}")
-    session.commit()
-    log.info("Exported %d invoice(s) to %s", len(pending), path)
-    return len(pending)
+    return unwritable
 
 
 _last_problem: str | None = None   # logged once, not on every retry
 
 
-def try_export(session: Session) -> str | None:
+def try_export(session: Session, wait: bool = True) -> str | None:
     """export_pending() that never raises; returns an error message or None.
 
     The worker retries every few seconds, so the same problem (typically the workbook
     left open in Excel) is logged once, and shown on the waiting invoices' `error`."""
     global _last_problem
     try:
-        export_pending(session)
+        export_pending(session, wait)
         if _last_problem:
             log.info("Excel export working again")
             _last_problem = None

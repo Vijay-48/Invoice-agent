@@ -62,8 +62,11 @@ def get(client, inv_id):
     return client.get(f"/api/v1/invoices/{inv_id}").json()
 
 
-def excel_rows(sheet="Invoices"):
-    wb = load_workbook(settings.excel_path)
+FY = "2026-27"   # make_extracted's invoices are dated 2026-09-15
+
+
+def excel_rows(sheet="Invoices", fy=FY):
+    wb = load_workbook(excel.workbook_path(fy))
     return [list(r) for r in wb[sheet].iter_rows(min_row=2, values_only=True)]
 
 
@@ -142,7 +145,7 @@ def test_needs_review_then_correct_and_approve(client, users, fake_extract):
     run_worker()
     d = get(client, inv_id)
     assert d["status"] == Status.NEEDS_REVIEW and "Low extraction confidence" in d["status_reason"]
-    assert not Path(settings.excel_path).exists()
+    assert not excel.list_workbooks()
 
     ravi = users["ravi"]
     assert client.patch(f"/api/v1/invoices/{inv_id}", json={}, headers=h(ravi)).status_code == 400
@@ -300,7 +303,8 @@ def test_prepare_pages_and_extract(tmp_path, monkeypatch):
     doc.save(pdf)
     doc.close()
     images, text, total = extract.prepare_pages(str(pdf))
-    assert len(images) == 5 and "page 5" in text and "page 6" not in text
+    # Over the limit: the first and last pages, then the next in order when all look alike
+    assert len(images) == 5 and "page 7 ---" in text and "page 4 ---" in text and "page 5 ---" not in text
     assert extract.page_count(str(pdf)) == 7
 
     seen = {}
@@ -412,11 +416,11 @@ def test_old_workbook_gets_document_column(client, users, fake_extract):
     wb.active.title = "Invoices"
     wb["Invoices"].append([c[0] for c in excel.INVOICE_COLUMNS[:-1]])   # header from the previous version
     wb["Invoices"].append([99] + [None] * 19)
-    wb.save(settings.excel_path)
+    wb.save(excel.workbook_path(FY))
     fake_extract.append(make_extracted())
     upload(client, users["priya"])
     run_worker()
-    ws = load_workbook(settings.excel_path)["Invoices"]
+    ws = load_workbook(excel.workbook_path(FY))["Invoices"]
     assert ws.cell(1, 21).value == "Document" and ws.cell(3, 21).value == "Invoice" and ws.cell(2, 1).value == 99
 
 

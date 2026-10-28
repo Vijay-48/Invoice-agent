@@ -42,7 +42,9 @@ INSTRUCTIONS = [
     "- invoice_kind: payment_reminder, consolidated, final, interim, retainer, timesheet, recurring, "
     "import, else regular. reference_invoice_number: the invoice a note or reminder refers to. "
     "currency: ISO code of the amounts as printed ('$' or US address = USD, '€' = EUR, '₹'/Rs = INR); "
-    "INR only if no other currency is shown. irn if printed. voucher_number, voucher_date: null.",
+    "INR only if no other currency is shown. irn if printed. voucher_number, voucher_date: null.\n"
+    "- hsn_summary: copy the printed HSN/SAC-wise summary table, one row per HSN (taxable value, total "
+    "tax); [] if the document has none.",
 
     "Journal vouchers (e.g. Tally): extract the invoice they record.\n"
     "- supplier_name = the party credited ('To X ... Cr'); the company at the top is the buyer. "
@@ -53,7 +55,7 @@ INSTRUCTIONS = [
     "lines); grand_total = party credit + any TDS credited.\n"
     "- lines from the narration's 'qty @ rate + GST x%'; else one line per purchase ledger, quantity 1.\n"
     "- place_of_supply_state_code from a state in the ledger names (e.g. Nagaland 13, West Bengal 19).\n"
-    "- invoice_kind regular, currency INR, reference_invoice_number and irn null.\n"
+    "- invoice_kind regular, currency INR, reference_invoice_number and irn null, hsn_summary [].\n"
     "Example: 'Purchases 4,77,755.00 Dr; Input IGST 85,996.00 Dr; To ITI Limited 5,63,751.00 Cr; "
     "Inv.No.BO25260106, dt.07.02.26 ... 10.058 KM @ Rs.47500 + GST 18%', voucher No. 075 dated 1-Mar-26 "
     "-> supplier ITI Limited, invoice BO25260106 of 2026-02-07, voucher 075 of 2026-03-01, one line "
@@ -128,17 +130,42 @@ def prepare_pages(file_path: str, passwords: list[str] | None = None) -> tuple[l
     images, texts = [], []
     with PDF_LOCK, _open_pdf(path, passwords or []) as doc:   # MuPDF: one thread at a time
         total = doc.page_count
-        for i, page in enumerate(doc):
-            if i >= settings.max_pages:
-                break
+        page_texts = [p.get_text() for p in doc] if total > settings.max_pages else []
+        for i in select_pages(page_texts, total, settings.max_pages):
+            page = doc[i]
             png = path.with_name(f"{path.stem}_p{i + 1}.png")
             if not png.exists():   # written under another name first: a crash never leaves half a PNG
                 part = png.with_name(png.stem + ".part.png")
                 page.get_pixmap(dpi=render_dpi(page.rect, 200)).save(part)
                 os.replace(part, png)
             images.append(Image(filepath=str(png)))
-            texts.append(f"--- page {i + 1} ---\n{page.get_text()}")
+            texts.append(f"--- page {i + 1} ---\n{page_texts[i] if page_texts else page.get_text()}")
     return images, "\n".join(texts).strip(), total
+
+
+BOILERPLATE = re.compile(r"terms\s*(and|&)\s*conditions|conditions of sale|general terms|jurisdiction|"
+                         r"declaration|bank details|authori[sz]ed signator", re.IGNORECASE)
+AMOUNT = re.compile(r"\d[\d,]*\.\d{2}(?!\d)")
+
+
+def select_pages(page_texts: list[str], total: int, limit: int) -> list[int]:
+    """Which pages to read (0-based, in order). Up to `limit` pages: all of them. A longer document:
+    the first page (supplier, buyer, number) and the last (totals) always, then the pages with the most
+    amounts, skipping terms-and-conditions pages. Amounts per page is a cheap stand-in for "has line items"."""
+    if total <= limit:
+        return list(range(total))
+    chosen = {0, total - 1}
+
+    def score(i: int) -> int:
+        text = page_texts[i]
+        amounts = len(AMOUNT.findall(text))
+        return amounts - (1000 if BOILERPLATE.search(text) and amounts < 5 else 0)
+
+    for i in sorted(range(1, total - 1), key=lambda i: (-score(i), i)):
+        if len(chosen) >= limit:
+            break
+        chosen.add(i)
+    return sorted(chosen)
 
 
 class AIServiceUnavailable(Exception):
@@ -174,6 +201,18 @@ def page_count(file_path: str) -> int:
         return 1
     with PDF_LOCK, pymupdf.open(file_path) as doc:
         return doc.page_count
+
+
+HSN_HEADER = re.compile(r"\b(?:HSN|SAC)(?:\s*/\s*(?:HSN|SAC))?\b", re.IGNORECASE)   # "HSN/SAC" = one column
+HSN_SUMMARY_TITLE = re.compile(r"\b(HSN|SAC)[\s/-]*(SAC[\s/-]*)?(wise|summary)|tax\s+summary", re.IGNORECASE)
+
+
+def hsn_summary_printed(text: str, lines_have_hsn: bool) -> bool:
+    """Is there an HSN-wise summary table in the document's text? A titled summary, or an HSN column a
+    second time (the first is the line items'); with no HSN in the line items, one HSN column is the summary."""
+    if HSN_SUMMARY_TITLE.search(text):
+        return True
+    return len(HSN_HEADER.findall(text)) >= (2 if lines_have_hsn else 1)
 
 
 def extract_invoice(file_path: str, name: str | None = None, model: str | None = None,
@@ -218,10 +257,16 @@ def extract_invoice(file_path: str, name: str | None = None, model: str | None =
         log.error("AI returned no invoice data: %s", message)
         raise ValueError(f"Extractor returned unexpected output: {result.content!r}")
     d = result.content
+    if d.hsn_summary and not hsn_summary_printed(text, any(l.hsn_sac for l in d.lines)):
+        # Asked to copy the table, the AI also builds one from the lines when none is printed; such a
+        # summary only agrees with itself (D-95). Scans have no text to confirm the table with.
+        log.info("'%s': HSN summary not found in the document's text; ignored", name)
+        d.hsn_summary = []
     d._model = agent.model.id
     m = getattr(result, "metrics", None)   # token counts, when the model reports them
     d._usage = {"input_tokens": getattr(m, "input_tokens", 0) or 0,
-                "output_tokens": getattr(m, "output_tokens", 0) or 0, "scanned": scanned, "pages": pages}
+                "output_tokens": getattr(m, "output_tokens", 0) or 0, "scanned": scanned, "pages": pages,
+                "read_pages": [int(m) for m in re.findall(r"--- page (\d+) ---", text)] or None}
     log.info("AI result: %s, supplier '%s' (%s), invoice '%s' dated %s, total %.2f, %d line(s), "
              "confidence %.2f%s", d.document_type, d.supplier_name, d.supplier_gstin, d.invoice_number,
              d.invoice_date, d.grand_total, len(d.lines), d.confidence,

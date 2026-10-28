@@ -40,7 +40,7 @@ def perfect_reader(registry: dict):
             place_of_supply_state_code=inv["buyer_gstin"][:2], po_number=None, irn=None,
             lines=[{"description": line["description"], "hsn_sac": line["hsn"], "quantity": line["qty"],
                     "unit_price": line["price"], "taxable_value": line["taxable"], "gst_rate": line["rate"]}
-                   for line in inv["lines"]],
+                   for line in inv["lines"]], hsn_summary=[],
             taxable_total=inv["taxable"], cgst=inv["cgst"], sgst=inv["sgst"], igst=inv["igst"],
             round_off=inv["round_off"], grand_total=inv["total"], amount_in_words=inv["words"],
             confidence=0.97, low_confidence_fields=[])
