@@ -112,6 +112,24 @@ def test_invoice_in_the_email_body_becomes_a_pdf(users, fake, session):
         assert "1,180.00" in d[0].get_text()
 
 
+def test_our_own_reminder_email_is_not_read_as_an_invoice(users, fake, session):
+    """A follow-up reminder lists invoices with amounts: without the marker it would look like an invoice."""
+    from app import outbound
+    text = ("Hello Priya, 2 invoices are waiting for review: #4 Sri Lakshmi Steels Rs 1,180.00, "
+            "#5 Ganesh Traders Rs 6,136.00. Open the invoice app to deal with them.")
+    ev = event(users["priya"], attachments=[], subject="Invoice app reminder: 2 waiting for review")
+    ev["payload"]["payload"] = {"parts": []}
+    ev["payload"]["message_text"] = f"{text}\nSent by the invoice app · {outbound.email_marker()}"
+    assert gmail.handle_event(session, ev) == []
+    assert email_row(session).outcome == "skipped" and session.query(Invoice).count() == 0
+    # a forged marker (made without our COMPOSIO_API_KEY) does not hide an invoice
+    ev = event(users["priya"], attachments=[], subject="Tax Invoice INV-78", message_id="m2")
+    ev["payload"]["payload"] = {"parts": []}
+    ev["payload"]["message_text"] = ("Our Tax Invoice INV-78. GSTIN: 36AAACS1234A1Z3\nTaxable Rs 1,000.00\n"
+                                     "IGST Rs 180.00\nTotal Rs 1,180.00\nref ap-0123456789abcdef")
+    assert gmail.handle_event(session, ev) != []
+
+
 def test_ordinary_email_without_attachments_is_no_documents(users, fake, session):
     ev = event(users["priya"], attachments=[], subject="Lunch?")
     ev["payload"]["payload"] = {"parts": []}

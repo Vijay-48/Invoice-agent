@@ -1,4 +1,5 @@
-"""WhatsApp through Twilio: an incoming channel only (we never send replies).
+"""WhatsApp through Twilio: an incoming channel. Replies and reminders are sent only when
+FOLLOWUP_ENABLED=true (app/followup.py, app/outbound.py); otherwise nothing is ever sent back.
 
 Twilio POSTs each incoming message as form data to /api/v1/webhook/whatsapp.
 The webhook logs each message and maps the sender to a user (WHATSAPP_SENDERS); messages
@@ -290,15 +291,18 @@ def download_all(message_sid: str, account_sid: str, media: list[tuple[str, str]
                  user_id: int, sender: str) -> None:
     """Runs after the reply is sent. Each attachment on its own: downloaded, checked, then
     ingested; one that fails doesn't stop the others."""
+    from app import followup      # here, not at the top: followup imports this module
     for index, (url, content_type) in enumerate(media):
         try:
             name, content, ref = download_media(url, content_type, account_sid, message_sid, index)
         except MediaRejected as e:
             log.warning("WhatsApp message %s media %d rejected: %s", message_sid, index, e)
+            followup.notify_unreadable(user_id, sender)     # does nothing unless FOLLOWUP_ENABLED
             continue
         except httpx.HTTPError as e:      # the class only: httpx messages can contain the URL
             log.warning("WhatsApp message %s media %d download failed: %s", message_sid, index,
                         type(e).__name__)
+            followup.notify_unreadable(user_id, sender)
             continue
         except Exception as e:
             log.error("WhatsApp message %s media %d: unexpected %s", message_sid, index, type(e).__name__)
@@ -316,6 +320,7 @@ def download_all(message_sid: str, account_sid: str, media: list[tuple[str, str]
         else:
             log.info("WhatsApp message %s media %d is the same file as invoice %s; not queued again",
                      message_sid, index, invoice_id)
+        followup.acknowledge_file(user_id, sender, created)
 
 
 @router.post("/whatsapp", response_class=Response)
@@ -328,6 +333,10 @@ def incoming_message(background: BackgroundTasks, From: str = Form(...), Message
     log.info("WhatsApp message %s from %s: %d characters of text, %d media",
              MessageSid, mask_sender(From), len(Body), NumMedia)
     user_id = sender_user_id(From, MessageSid)
+    if user_id is not None and settings.followup_enabled:
+        # Remembers when they last wrote (WhatsApp's 24-hour window) and answers 1 / 2 / STOP
+        from app import followup      # here, not at the top: followup imports this module
+        background.add_task(followup.on_incoming, user_id, From, Body, bool(media))
     if user_id is not None and media:
         if NumMedia > len(media):
             log.warning("WhatsApp message %s: only %d of %d media are downloaded", MessageSid, len(media), NumMedia)

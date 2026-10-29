@@ -27,7 +27,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, object_session
 
-from app import gmail, whatsapp
+from app import followup, gmail, voice, whatsapp
 from app.background import Background
 from app.config import settings
 from app.db import Base, SessionLocal, engine, get_session
@@ -36,8 +36,8 @@ from app.logs import setup_logging
 from app.documents import PDF_LOCK, expand
 from app.ingest import ingest_document, is_accepted
 from app import chat_store
-from app.models import (Invoice, AuditLog, ChatMessage, ChatSession, EmailMessage, PdfPassword, User, Status,
-                        audit)
+from app.models import (Invoice, AuditLog, ChatMessage, ChatSession, EmailMessage, FollowUp, FollowUpEvent,
+                        PdfPassword, User, Status, VoiceCall, audit)
 from app.pipeline.evaluate import evaluate
 from app.pipeline.supplier import list_suppliers
 from app.schemas import InvoiceCorrection, from_stored
@@ -834,8 +834,113 @@ def download_excel(year: str | None = Query(None, description="Financial year li
                     headers={"Content-Disposition": f'attachment; filename="{path.name}"'})
 
 
+# ---------- follow-ups: WhatsApp reminders and calls (what was sent, to whom, and what came of it)
+
+@api.get("/followups")
+def list_followups(state: Literal["active", "done"] | None = None, user_id: int | None = None,
+                   limit: int = Query(50, ge=1, le=200), session: Session = Depends(get_session)):
+    """Reminder ladders, newest first. Shows `enabled` / `dry_run` so you can tell nothing is being sent."""
+    query = select(FollowUp).order_by(FollowUp.id.desc()).limit(limit)
+    if state:
+        query = query.where(FollowUp.state == state)
+    if user_id:
+        query = query.where(FollowUp.target_user_id == user_id)
+    rows = list(session.scalars(query))
+    invoices = {i.id: i for i in session.scalars(select(Invoice).where(Invoice.id.in_({f.invoice_id for f in rows})))}
+    return {"enabled": settings.followup_enabled, "dry_run": settings.followup_dry_run,
+            "items": [followup.serialize(f, invoices.get(f.invoice_id)) for f in rows]}
+
+
+@api.get("/followups/events")
+def followup_events(user_id: int | None = None, limit: int = Query(100, ge=1, le=500),
+                    session: Session = Depends(get_session)):
+    """What was sent (or would have been, in a dry run), skipped, failed or answered, newest first."""
+    query = select(FollowUpEvent).order_by(FollowUpEvent.id.desc()).limit(limit)
+    if user_id:
+        query = query.where(FollowUpEvent.user_id == user_id)
+    return [followup.serialize_event(e) for e in session.scalars(query)]
+
+
+@api.post("/followups/{follow_up_id}/stop")
+def stop_followup(follow_up_id: int, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    """End a reminder ladder by hand."""
+    fu = session.scalar(select(FollowUp).where(FollowUp.id == follow_up_id).with_for_update()) or _404("Follow-up")
+    if fu.state != "active":
+        raise HTTPException(409, "This follow-up is already finished")
+    fu.state, fu.done_reason, fu.awaiting_reply_since = "done", "stopped", None
+    session.add(FollowUpEvent(follow_up_id=fu.id, user_id=fu.target_user_id, channel="whatsapp", direction="in",
+                              status="reply", detail=f"stopped by {user.name}"[:500]))
+    session.commit()
+    return followup.serialize(fu, session.get(Invoice, fu.invoice_id))
+
+
+@api.get("/voice/calls")
+def list_voice_calls(limit: int = Query(20, ge=1, le=100), session: Session = Depends(get_session)):
+    """Follow-up phone calls with their outcome and transcript."""
+    return [followup.serialize_call(c) for c in session.scalars(select(VoiceCall).order_by(VoiceCall.id.desc()).limit(limit))]
+
+
+CALL_ENDED = {"completed", "no_answer", "busy", "failed", "canceled", "dry_run"}
+LIVE_MAX_SECONDS = 15 * 60
+
+
+def _call_snapshot(call_id: int) -> tuple[str, list, str | None] | None:
+    with SessionLocal() as session:
+        c = session.get(VoiceCall, call_id)
+        return None if c is None else (c.status, list(c.transcript or []), c.outcome)
+
+
+def _newest_open_call() -> int | None:
+    with SessionLocal() as session:
+        return session.scalar(select(VoiceCall.id).where(VoiceCall.status.notin_(CALL_ENDED))
+                              .order_by(VoiceCall.id.desc()).limit(1))
+
+
+@api.get("/voice/calls/{call_ref}/live")
+async def live_transcript(call_ref: str):
+    """The conversation as it happens, one line per turn ("AI: ...", "Caller: ..."), until the call ends.
+    `latest` follows the call in progress, or waits (up to 15 minutes) for the next one to start.
+    Watch it with: curl -N http://localhost:8000/api/v1/voice/calls/latest/live"""
+    if call_ref != "latest" and not call_ref.isdigit():
+        raise HTTPException(422, "Use a call id or 'latest'")
+
+    async def lines():
+        deadline = time.monotonic() + LIVE_MAX_SECONDS
+        call_id = int(call_ref) if call_ref.isdigit() else None
+        if call_id is None:
+            yield "Waiting for the next call...\n"
+            while (call_id := await run_in_threadpool(_newest_open_call)) is None:
+                if time.monotonic() > deadline:
+                    yield "No call started.\n"
+                    return
+                await asyncio.sleep(1)
+            yield f"Call {call_id}:\n"
+        shown = 0
+        while time.monotonic() < deadline:
+            snapshot = await run_in_threadpool(_call_snapshot, call_id)
+            if snapshot is None:
+                yield f"No call {call_id}.\n"
+                return
+            status, transcript, outcome = snapshot
+            for line in transcript[shown:]:
+                yield f"{'AI' if line.get('role') == 'assistant' else 'Caller'}: {line.get('text', '')}\n"
+            shown = len(transcript)
+            if status in CALL_ENDED:
+                yield f"-- call {status}; outcome: {outcome or 'none'}\n"
+                return
+            await asyncio.sleep(1)
+
+    return StreamingResponse(lines(), media_type="text/plain; charset=utf-8")
+
+
+@api.get("/voice/calls/{call_id}")
+def get_voice_call(call_id: int, session: Session = Depends(get_session)):
+    return followup.serialize_call(session.get(VoiceCall, call_id) or _404("Call"))
+
+
 app.include_router(api)
 app.include_router(whatsapp.router)
+app.include_router(voice.router)
 
 
 # ---------- Composio webhook (production delivery of new-email events)

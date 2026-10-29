@@ -153,7 +153,50 @@ Nothing reads the document here. It now waits in the queue for section 4.
    - `ingest_media` → `ingest.ingest_document(source="whatsapp", source_ref="<MessageSid>/<MediaSid>")`
      in its own session (section 2's dedupe)
    - one failed attachment is logged (reason or exception class only) and the next one carries on
-4. From here it is section 4. There is no reply to the sender and no retry of a failed download.
+4. From here it is section 4. A failed download is not retried by us. With `FOLLOWUP_ENABLED=true` the same
+   webhook also schedules `followup.on_incoming` (remember when this number last wrote; answer `1` / `2` /
+   `STOP`) and `download_all` sends a receipt or an "unusable attachment" note: see section 3f.
+
+### 3f. Follow-up messages and calls (D-98, D-99): `followup.run` (one loop, only when `FOLLOWUP_ENABLED=true`)
+
+```
+every 60 s: run_once ─► discover ─► close_resolved ─► claim_due ─► prepare ─► (send) ─► record
+```
+
+1. **`discover`**: for people in `WHATSAPP_SENDERS` only. NEEDS_REVIEW / NEEDS_PASSWORD invoices that have waited
+   the first step of `FOLLOWUP_REVIEW_LADDER` get a `follow_ups` row (kind `review`); APPROVED invoices not in Excel
+   after the first step of `FOLLOWUP_EXPORT_LADDER` get kind `export`; WhatsApp-sourced invoices that were decided
+   in the last 24 h get kind `result` (a receipt of the outcome). One row per (invoice, kind): the unique index
+   makes it safe to run in several processes.
+2. **`close_resolved`**: follow-ups whose invoice left the waiting state become `done` / `resolved`.
+3. **`claim_due`**: active rows with `next_due_at <= now`, claimed with `SKIP LOCKED` and a 10-minute lease.
+   Outside `FOLLOWUP_HOURS` only `result` rows are claimed. The transaction ends here.
+4. **`prepare`** (reads, no sending): groups what is due by (person, channel). `whatsapp`: `compose` writes one
+   message, then the daily cap and WhatsApp's 24-hour window decide *send* / *template* / *skip*. `voice`: the daily
+   call cap, then a `voice_calls` row is created. No number in `WHATSAPP_SENDERS` -> `unreachable`.
+5. **`_send`** (no transaction open): `outbound.send_whatsapp` or `outbound.place_call` (Twilio REST). With
+   `FOLLOWUP_DRY_RUN=true` they return `dry_run` and Twilio is never touched.
+6. **`record`**: one `follow_up_events` row per follow-up; WhatsApp: `step + 1`, next step at
+   `started_at + minutes` (or `done` / `finished`), `awaiting_reply_since` set for `review`. A failed send retries in
+   30 minutes, 3 times, then `unreachable`. A real call is left waiting for Twilio's status callback.
+
+**A reply** (webhook `incoming_message` -> `followup.on_incoming`, background task): `1` pauses the person's
+awaiting follow-ups 24 h, `2` snoozes 2 h, `STOP` closes them; anything else gets the options once per 10 minutes.
+Nothing here touches the invoice.
+
+**A call** (`app/voice.py`):
+
+```
+place_call ─► Twilio ─► POST /webhook/voice?call=<id> (signed) ─► TwiML <ConversationRelay url=wss://.../stream?...&token=...>
+                       WebSocket /webhook/voice/stream: setup ─► prompt (what they said) ─► text (what we say) ... ─► end
+                       POST /webhook/voice/status ─► followup.finish_call (advance the ladder, or retry once after 1 h)
+```
+
+- `stream` refuses a wrong token, a call that is not `in_progress`, and a `setup` with another call id or `CallSid`.
+- `Conversation.respond` sends the model (`VOICE_MODEL`) the invoice facts from `followup.call_context` and the
+  conversation; its only tool `record_outcome` -> `followup.apply_outcome` (`handling` / `remind_later` move
+  reminders, the rest are only recorded). Keypad 1 / 2 do the same with no model.
+- The transcript is saved when the socket closes (`GET /api/v1/voice/calls`).
 
 ## 4. The worker reads a document: `worker.run` (one loop per worker thread)
 
@@ -336,7 +379,40 @@ The Python locks are per process. That is one reason the API must run as one pro
 
 ---
 
-## You are here (2026-10-28, WhatsApp channel added)
+## You are here (2026-10-29, email follow-ups added)
+
+### Email follow-ups (D-100; 417 tests pass)
+
+- A ladder step can be `email@minutes`: §3f sends it with `gmail.send_email` from a connected Gmail
+  (`FOLLOWUP_EMAIL_SENDER_USER_ID`, else the report's sender) to the owner's `users.email`, only if
+  `FOLLOWUP_EMAIL_TO` lists it. No Twilio needed, so this is the channel that works while the Twilio account is
+  a trial.
+- A step on a channel the person can't be reached on is now skipped and the ladder moves on (before: closed).
+- The Gmail listener (§3b, `_ingest_email`) skips our own reminders by a keyed marker at their foot, so a
+  reminder is never read as an invoice in the body.
+- Since 2026-10-28, found with real Twilio: a trial account refuses some call parameters (fallback in
+  `place_call`), fetches the answer URL unsigned (so the call's TwiML is now sent with the call; a trial refuses
+  that too, so calls stay blocked until the account is upgraded), and WhatsApp needs the sandbox re-joined. The
+  live call transcript is at `GET /api/v1/voice/calls/{id|latest}/live`. Tests pin every follow-up setting.
+
+## Earlier: 2026-10-28, follow-up WhatsApp messages and calls added
+
+### Follow-ups (D-98, D-99; 396 tests pass)
+
+- New loop §3f (`followup.run`, off by default; `FOLLOWUP_DRY_RUN=true` records what would be sent and sends
+  nothing). It reminds the owner of an invoice waiting for review (WhatsApp at 4 h and 24 h, an AI phone call at
+  48 h), tells a person whose approved invoice is not in Excel, and tells a WhatsApp sender what became of their
+  file. Reply `1` / `2` / `STOP` moves reminders only.
+- The call is an AI conversation (Twilio ConversationRelay) whose only tool records one of five outcomes.
+- New tables: `follow_ups`, `follow_up_events`, `voice_calls`, `whatsapp_sessions`. New files: `app/followup.py`,
+  `app/outbound.py`, `app/voice.py`. New endpoints: `/api/v1/followups`, `/followups/events`,
+  `/followups/{id}/stop`, `/voice/calls`, and Twilio's `/api/v1/webhook/voice` (+ `/status`, `/stream`).
+- **Not tried with real Twilio yet.** Tests fake Twilio and the model. Before going live: dry-run first, then one
+  person, one call; accept the AI/ML addendum; check the language and Indian calling rules (D-99).
+- Not on the path: roles (reminders go to the invoice owner), a WhatsApp inbox log, PO/GRN follow-ups,
+  automatic retry of a failed media download.
+
+## Earlier: 2026-10-28, WhatsApp channel added
 
 ### WhatsApp through Twilio (D-97; 341 tests pass)
 

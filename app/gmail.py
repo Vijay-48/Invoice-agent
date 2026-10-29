@@ -27,6 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from app import outbound
 from app.config import settings
 from app.logs import timed
 from app.documents import (IMAGE_EXT, LOGO_MAX_BYTES, body_to_pdf, expand, looks_like_invoice_text,
@@ -378,6 +379,11 @@ def _ingest_email(session: Session, user: User, message: dict, row: EmailMessage
         atts = attachments_of(message)
         body = body or _first(message, "message_text", "messageText", default="") or ""
     log.debug("Email %s attachments: %s", message_id, [(a["filename"], a.get("mime_type")) for a in atts])
+    if not atts and outbound.is_our_reminder(body):
+        log.info("Email %s is one of our own follow-up reminders; skipped", message_id)
+        row.outcome, row.error = "skipped", None
+        session.commit()
+        return []
 
     entries = {e["ref"]: e for e in (row.attachments or [])}
     created, seen_names = [], {}

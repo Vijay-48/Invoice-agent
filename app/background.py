@@ -8,7 +8,7 @@ import logging
 import threading
 import time
 
-from app import worker, gmail_listener, reports
+from app import worker, gmail_listener, reports, followup
 from app.config import settings
 
 log = logging.getLogger("background")
@@ -38,6 +38,8 @@ class Background:
                 log.info("COMPOSIO_API_KEY not set: Gmail listener not started (uploads still work)")
         if settings.report_schedule.strip().lower() in reports.SCHEDULES:
             self._spawn("reports", reports.run)
+        if settings.followup_enabled:
+            self._spawn("followup", followup.run)
 
     def _spawn(self, name: str, target) -> None:
         t = threading.Thread(target=target, args=(self.stop,), name=name, daemon=True)

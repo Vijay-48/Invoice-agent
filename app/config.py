@@ -93,5 +93,40 @@ class Settings(BaseSettings):
     # "+919876543210:1,+14155550100:2". Messages from any other number are ignored.
     whatsapp_senders: str = ""
 
+    # Follow-up WhatsApp messages and calls (app/followup.py, app/voice.py). Off by default; with
+    # FOLLOWUP_DRY_RUN=true (the default) nothing is sent: what would be sent is only recorded.
+    # People are reached only at the numbers listed in WHATSAPP_SENDERS.
+    followup_enabled: bool = False
+    followup_dry_run: bool = True
+    followup_hours: str = "09:00-19:00"          # local time; nothing is sent or called outside it
+    # "channel@minutes": steps of the ladder, counted from when the invoice began waiting
+    followup_review_ladder: str = "whatsapp@240,whatsapp@1440,voice@2880"    # NEEDS_REVIEW / NEEDS_PASSWORD
+    followup_export_ladder: str = "whatsapp@30"                              # APPROVED but not in Excel
+    followup_result_notices: bool = True         # tell a WhatsApp sender what became of their file
+    followup_ack_hours: float = 24               # reply 1 ("I'm handling it") pauses reminders this long
+    followup_snooze_hours: float = 2             # reply 2 ("remind me later")
+    followup_max_per_day: int = 6                # WhatsApp messages (and, separately, emails) per person per day
+    followup_max_calls_per_day: int = 2
+    followup_escalation_user_id: int = 0         # the voice step calls this user (0 = the invoice owner)
+    # "email@minutes" steps go to the invoice owner's users.email, only when it is listed here
+    # (comma-separated). Sent from a connected Gmail: this user's, 0 = REPORT_SENDER_USER_ID's / the first
+    followup_email_to: str = ""
+    followup_email_sender_user_id: int = 0
+    followup_batch: int = 50                     # follow-ups handled per check
+    twilio_whatsapp_from: str = ""               # "whatsapp:+14155238886" (sandbox) or your approved sender
+    # Content template (HX...) for messages outside WhatsApp's 24-hour window; empty = those are skipped.
+    # Its body must be one variable: "{{1}}"
+    twilio_whatsapp_template_sid: str = ""
+    twilio_voice_from: str = ""                  # a Twilio number that can place calls (not the sandbox number)
+    # The call is a live AI conversation through Twilio ConversationRelay (needs a public wss:// address
+    # and the AI/ML addendum accepted in the Twilio Console)
+    voice_model: str = "gpt-4o-mini"
+    voice_language: str = "en-US"                # check Twilio's list for your language (e.g. hi-IN)
+    voice_tts_provider: str = ""                 # empty = Twilio's default
+    voice_name: str = ""
+    voice_max_turns: int = 8                     # caller turns before the assistant wraps up
+    voice_max_seconds: int = 300                 # Twilio ends the call after this long
+    voice_hangup_delay_seconds: float = 6        # after the goodbye, so it is spoken before the call ends
+
 
 settings = Settings()

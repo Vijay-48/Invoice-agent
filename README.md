@@ -169,8 +169,43 @@ Invoices sent on WhatsApp to your Twilio number are processed like uploads.
 Each PDF, image, Excel, CSV or Word attachment (up to 10 per message, `MAX_UPLOAD_MB` each) becomes
 its own invoice with source `whatsapp`; the same file sent again keeps one record. Every request's
 Twilio signature is checked; media is downloaded only from Twilio, for your account. Nothing is sent
-back to the sender. Text-only messages, .zip files and unsupported types are only logged (number
-masked, text never logged).
+back to the sender unless follow-ups are on (next section). Text-only messages, .zip files and unsupported
+types are only logged (number masked, text never logged).
+
+## Follow-up WhatsApp messages, emails and calls
+
+Nobody should have to remember to look at the review list. With `FOLLOWUP_ENABLED=true` the app reminds the
+person whose invoice is waiting, on a ladder (`FOLLOWUP_REVIEW_LADDER`, default: WhatsApp after 4 h, WhatsApp
+after 24 h, an AI phone call after 48 h), tells them when an approved invoice did not reach Excel, and tells a
+WhatsApp sender what became of their file. One message lists all of a person's invoices.
+
+**Email, no Twilio needed.** A step can be `email@minutes`, e.g. `FOLLOWUP_REVIEW_LADDER=email@240,email@1440`.
+The email goes from a connected Gmail (`FOLLOWUP_EMAIL_SENDER_USER_ID`, 0 = the report's sender) to the invoice
+owner's address, only if that address is listed in `FOLLOWUP_EMAIL_TO`. Emails take no replies: the reminders
+stop by themselves once the invoice is dealt with. A step on a channel the person has no address for is skipped.
+
+**Try it safely first.** `FOLLOWUP_DRY_RUN=true` (the default) sends nothing; each step is only recorded:
+`GET /api/v1/followups` (the ladders) and `GET /api/v1/followups/events` (what would have been sent).
+
+To go live:
+
+1. `TWILIO_WHATSAPP_FROM` (`whatsapp:+14155238886` for the sandbox), and `WHATSAPP_SENDERS` for the people to
+   reach. Only those numbers are ever contacted, only during `FOLLOWUP_HOURS`, at most `FOLLOWUP_MAX_PER_DAY`
+   messages a day.
+2. WhatsApp allows free-form messages for 24 hours after a person last wrote to you. Later reminders need an
+   approved template: create one in Twilio (Content Template Builder) whose body is exactly `{{1}}` and set
+   `TWILIO_WHATSAPP_TEMPLATE_SID`. Without it such a reminder is skipped and the ladder moves on to the call.
+3. For the phone call: a Twilio number that can call (`TWILIO_VOICE_FROM`), the "predictive and generative AI/ML
+   features addendum" accepted in the Twilio Console (Voice > Settings), `PUBLIC_BASE_URL` set to your public
+   **https** address, and `VOICE_LANGUAGE` set to a language Twilio supports. Check the rules for calling Indian
+   numbers first. The call is a live conversation; its only power is to record "I'll handle it", "remind me later",
+   "wrong person", "I need someone from accounts" or "nothing agreed".
+4. Set `FOLLOWUP_DRY_RUN=false`, restart, and watch `/api/v1/followups/events` and `/api/v1/voice/calls`
+   (outcome and transcript).
+
+People answer a reminder with **1** (I'm handling it: reminders pause 24 h), **2** (remind me later: 2 h) or
+**STOP**. A reply or a call never approves, rejects or changes an invoice; that stays in the app. End a ladder by
+hand with `POST /api/v1/followups/{id}/stop`.
 
 ## AI assistant
 
@@ -342,6 +377,9 @@ Composio are faked, so no keys are used. Other database:
     app/gmail_listener.py    receives Composio events (websocket, or webhook in production)
     app/gmail_health.py      expired/revoked Gmail access: check, show, alert
     app/whatsapp.py          WhatsApp via Twilio: signed webhook, sender mapping, media download -> ingest
+    app/followup.py          reminder ladders (WhatsApp, then a call), replies 1 / 2 / STOP, dry run
+    app/outbound.py          Twilio REST: send a WhatsApp message, place a call
+    app/voice.py             the follow-up call: ConversationRelay webhook + WebSocket, five outcomes
     app/background.py        starts/stops the worker and Gmail listener with the API
     app/worker.py            Postgres queue (SKIP LOCKED) + Excel retries
     app/pipeline/reading.py  reading a document: AI, e-invoice QR, second reading (worker + evaluation)

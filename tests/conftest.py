@@ -25,6 +25,17 @@ os.environ.update({
     "TWILIO_AUTH_TOKEN": "",
     "TWILIO_ACCOUNT_SID": "",
     "WHATSAPP_SENDERS": "",
+    # Follow-ups and calls: off and dry, whatever .env says (tests switch them on in memory)
+    "FOLLOWUP_ENABLED": "false",
+    "FOLLOWUP_DRY_RUN": "true",
+    "FOLLOWUP_REVIEW_LADDER": "whatsapp@240,whatsapp@1440,voice@2880",
+    "FOLLOWUP_HOURS": "09:00-19:00",
+    "FOLLOWUP_MAX_CALLS_PER_DAY": "2",
+    "FOLLOWUP_EMAIL_TO": "",
+    "FOLLOWUP_EMAIL_SENDER_USER_ID": "0",
+    "TWILIO_WHATSAPP_FROM": "",
+    "TWILIO_WHATSAPP_TEMPLATE_SID": "",
+    "TWILIO_VOICE_FROM": "",
     # Tests drive the worker by hand; test_background.py turns these on
     "RUN_WORKER": "false",
     "RUN_GMAIL_LISTENER": "false",

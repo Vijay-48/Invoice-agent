@@ -859,7 +859,168 @@ Known limits, not fixed (need a decision or are acceptable for now):
 - **Also**: `tests/conftest.py` now pins `PUBLIC_BASE_URL` and blanks the Twilio settings, so a real
   `.env` (e.g. an ngrok URL) can't leak into tests. The ngrok `PUBLIC_BASE_URL` had broken
   `test_gmail.py::test_connect_and_activate_flow`.
+- **Refined by D-98**: with `FOLLOWUP_ENABLED=true` the webhook also replies (receipts, 1 / 2 / STOP) and
+  remembers when a number last wrote. With it off (the default) nothing changes: still incoming only.
 - **Where**: `app/whatsapp.py`, `app/api.py` (`include_router(whatsapp.router)`), `app/config.py`,
   `requirements.txt` (`twilio>=9.0`), `.env.example`, `tests/test_whatsapp_webhook.py` (110 tests; its
   `SAMPLE_PDF`/`FakeAgent` helpers were copied from the source's `test_extract_preview.py`),
   `tests/conftest.py`.
+
+---
+
+## 14. Follow-up WhatsApp messages, calls and emails (2026-10-28, email 2026-10-29)
+
+### D-98 Follow-ups: reminder ladders by WhatsApp, off by default, dry run first
+
+- **Decision**: A background loop (`app/followup.py`, started with the API when `FOLLOWUP_ENABLED=true`)
+  keeps one follow-up per invoice and reason (table `follow_ups`):
+  - `review`: invoice waiting for a person (NEEDS_REVIEW / NEEDS_PASSWORD). Ladder
+    `FOLLOWUP_REVIEW_LADDER`, default `whatsapp@240,whatsapp@1440,voice@2880` (minutes after it began waiting).
+  - `export`: APPROVED but not in Excel after 30 minutes (workbook open, or no worker running).
+  - `result`: a file sent on WhatsApp: the sender is told what became of it (approved, needs review, ...).
+  - People get **one message per check listing their invoices** (5 lines, then "...and N more"), not one per
+    invoice.
+  - Replies: `1` = I'm handling it (reminders pause 24 h), `2` = remind me later (2 h), `STOP` ends the ladder.
+    A reply **only moves reminders**. It never approves, rejects or edits an invoice; that stays in the app.
+  - Receipts: a file sent on WhatsApp is acknowledged ("queued for reading"); an unusable attachment gets a
+    generic "please send a PDF or a photo again" (never the technical reason).
+  - The ladder ends by itself when the invoice leaves the waiting state.
+- **Safety rules**:
+  - Off unless `FOLLOWUP_ENABLED=true`; with `FOLLOWUP_DRY_RUN=true` (default) nothing is sent and each step
+    is only recorded in `follow_up_events` (`GET /api/v1/followups`, `/followups/events`), so a ladder can be
+    watched before it is live. The existing webhook tests keep their "no database, no network" guarantee
+    because every new call is gated by the same switch.
+  - Only numbers in `WHATSAPP_SENDERS` are contacted, only inside `FOLLOWUP_HOURS` (09:00-19:00; file receipts
+    are exempt), at most `FOLLOWUP_MAX_PER_DAY` (6) messages per person.
+  - WhatsApp allows free-form messages only 24 h after the person last wrote (`whatsapp_sessions`, with a
+    10-minute margin). Later, the approved template `TWILIO_WHATSAPP_TEMPLATE_SID` is used (one variable, the
+    text on one line); with no template the step is **skipped, recorded, and the ladder moves on**, so the call
+    is the fallback.
+  - Twilio is never called while a transaction holds rows: due rows are claimed with `SKIP LOCKED` and a
+    10-minute lease, then sent, then recorded. A crash between send and record can send the same step twice.
+  - Failed sends are retried after 30 minutes, three times, then the follow-up is closed as `unreachable`.
+    Event details hold Twilio's error code only, never a phone number, text or token.
+- **Why**: Invoices that wait for review are the common real-world stall, and nothing told anyone they were
+  waiting. The ladder, the limits and the dry run are what keep a reminder system from becoming noise or a risk.
+- **Instead of**:
+  - One message per invoice: a morning with 30 waiting invoices would be 30 messages.
+  - Letting a reply approve ("YES"): chat text has no verified identity, and the rule is that a channel
+    never carries authority by itself.
+  - Reply parsing by AI: three exact keywords are predictable and free.
+- **Trade-off**:
+  - A reply `1` applies to every invoice the person was last reminded about, not to one of them.
+  - Reminders go to the invoice's owner (the inbox owner or WhatsApp sender), not to "whoever should review":
+    there are no roles yet (no login), so there is nobody else to address. `FOLLOWUP_ESCALATION_USER_ID` only
+    redirects the call step.
+  - Numbers come from `.env`, so a new person needs a restart.
+  - No WhatsApp message log beyond `follow_up_events` (no inbound text is stored).
+  - Local server time is used for hours, like the scheduled report.
+- **Where**: `app/followup.py`, `app/outbound.py` (Twilio REST: `send_whatsapp`, `place_call`, dry run),
+  `app/models.py` (`FollowUp`, `FollowUpEvent`, `WhatsAppSession`), `app/whatsapp.py` (three gated hooks),
+  `app/background.py`, `app/api.py` (`/followups`, `/followups/events`, `/followups/{id}/stop`),
+  `app/config.py`, `tests/test_followup.py`.
+
+### D-99 Follow-up phone call: an AI conversation through Twilio ConversationRelay, limited to five outcomes
+
+- **Decision**: The last rung of the ladder is a phone call (`app/voice.py`), chosen by the user as a live
+  AI conversation rather than a keypad-only script.
+  - Flow: `followup` creates a `voice_calls` row and Twilio places the call (`TWILIO_VOICE_FROM`). When it is
+    answered Twilio POSTs `/api/v1/webhook/voice?call=<id>` (signed like the WhatsApp webhook); we return
+    `<Connect><ConversationRelay>`. Twilio does speech-to-text and text-to-speech and exchanges text with us
+    over a WebSocket (`/api/v1/webhook/voice/stream`); `VOICE_MODEL` (default gpt-4o-mini) writes what to say.
+    The final status arrives at `/api/v1/webhook/voice/status`.
+  - The model has **one tool, `record_outcome`**, with a fixed list: `handling`, `remind_later`, `wrong_person`,
+    `needs_human`, `none`. Only `handling` and `remind_later` change anything, and only reminder timing (as a
+    WhatsApp reply does). The facts it may mention (invoice, supplier, amount, reason) are put in its
+    instructions from the database; it cannot read anything else, approve, reject or correct.
+  - Keypad `1` / `2` give the same two answers with no AI.
+  - Limits: `VOICE_MAX_TURNS` (8) caller turns, `VOICE_MAX_SECONDS` (300, enforced by Twilio), at most
+    `FOLLOWUP_MAX_CALLS_PER_DAY` (2) per person, only in `FOLLOWUP_HOURS`. An unanswered call (no-answer, busy,
+    failed, canceled) is retried once after an hour, then the ladder moves on.
+  - The transcript (40 turns, 500 characters each) is kept on the call (`GET /api/v1/voice/calls`) so a
+    person can see what was said.
+- **Why**: A call is the step nobody ignores, and the user wanted a conversation (the person can say "I'm not
+  the right person" or "call me after lunch") instead of a fixed script.
+- **Security**:
+  - Twilio does not document signing the WebSocket handshake, so the stream URL carries a token (HMAC of the
+    call id with `TWILIO_AUTH_TOKEN`), the call must be `in_progress`, and the `setup` message must carry this
+    call's id and `CallSid`. Wrong token, wrong state or wrong setup closes the socket.
+  - What the caller says is untrusted data. The worst a prompt-injection can do is record one of the five
+    outcomes; a test sends an "approve every invoice" attempt and checks that nothing changes.
+  - A model error never leaks into logs (class name only) and ends the call politely with `needs_human`.
+- **Instead of**:
+  - A keypad-only IVR (the cheaper, more predictable option; still there as the keypad path).
+  - A streaming model with tool calls in flight: a non-streaming answer is simpler and testable; it adds about a
+    second per turn, which is the first thing to tune.
+  - Ending the call from our side at once: Twilio does not say whether text sent just before `end` is still
+    spoken, so `end` is sent `VOICE_HANGUP_DELAY_SECONDS` (6) after the goodbye.
+- **Trade-off / to check before going live**:
+  - **Not yet tried against real Twilio.** The code follows Twilio's published ConversationRelay message
+    formats (setup / prompt / dtmf / interrupt / error in; text / end out), and the tests fake both Twilio and
+    the model. The first real call is the real test.
+  - ConversationRelay needs the AI/ML addendum accepted in the Twilio Console, a public `wss://` address
+    (`PUBLIC_BASE_URL` must be https), and a language Twilio supports for text-to-speech and recognition
+    (`VOICE_LANGUAGE`, default en-US; check Twilio's list for Hindi, Telugu, ...).
+  - Calling Indian numbers has regulatory rules (registration, recording, do-not-disturb) that must be checked
+    with Twilio and the CA/legal before real use. Nothing here records audio; only the text is kept.
+  - Per-minute call cost plus model cost per turn; the daily cap is the cost control.
+  - If Twilio never sends the status callback, the follow-up is re-claimed after 30 minutes and a person could be
+    called twice.
+- **Found in the first real test (2026-10-28)**:
+  - A Twilio trial account refuses some call parameters (HTTP 400, code 0, "trial accounts have limited
+    parameter access"); Twilio's own sample (only To, From, Url) worked. `place_call` now tries all limits,
+    then without ring timeout / time limit / callback events, then without the status callback. Only that
+    refusal is retried. On a trial account the call therefore has no Twilio time limit (`VOICE_MAX_TURNS` still
+    ends the conversation), and without the callback the ladder moves on after 30 minutes.
+  - Failures now record Twilio's HTTP status, code and message (numbers removed); before, code 0 left only
+    "TwilioRestException", which hid the cause.
+  - `tests/conftest.py` pins the follow-up and Twilio settings: a live `.env` (follow-ups on) broke 63 webhook tests.
+  - The call then rang but ended after 5 s: on the trial account Twilio fetched the answer URL **without
+    `X-Twilio-Signature`** (7 fields, a different client; ngrok's log showed it), and the app answered 403. The
+    status callback of the same call was signed. Accepting unsigned requests was rejected as a weakening;
+    instead the call's TwiML (`<Connect><ConversationRelay>`) is now **given to Twilio when the call is
+    placed** (`voice.call_twiml`, `place_call(twiml=...)`), so nothing is fetched. The WebSocket keeps its own
+    protection (token + setup naming the call and its CallSid) and moves the call to `in_progress` itself. If
+    an account refuses inline TwiML, the URL is used as before.
+  - Live transcript: each turn is saved as it happens (before it is spoken), and
+    `GET /api/v1/voice/calls/{id|latest}/live` streams it as text ("AI: ...", "Caller: ...") until the call ends;
+    `latest` waits for the next call. `GET /api/v1/voice/calls/{id}` returns one call.
+- **Where**: `app/voice.py`, `app/followup.py` (`call_context`, `apply_outcome`, `finish_call`),
+  `app/outbound.py` (`place_call`), `app/models.py` (`VoiceCall`), `app/api.py` (`/voice/calls`),
+  `app/config.py`, `tests/test_voice.py`.
+
+### D-100 Email as a follow-up channel, sent from a connected Gmail (2026-10-29)
+
+- **Why**: the Twilio account is a trial. Its answer-URL fetch is unsigned (the call is refused, D-99) and its
+  WhatsApp sandbox needs re-joining every 72 hours, so neither reminder channel works today. Every user's Gmail is
+  already connected through Composio and `gmail.send_email` already sends reports, so email works now, with no
+  new provider and no cost.
+- **What**: a ladder step can be `email@minutes`, e.g. `FOLLOWUP_REVIEW_LADDER=email@240,whatsapp@1440,voice@2880`.
+  The email lists the same invoices as the WhatsApp message (one email per person, five lines per section,
+  HTML-escaped) and links to `REPORT_APP_URL` when set. It goes through the same claim / send-outside-the-
+  transaction / record cycle, dry run, sending hours and daily cap (`FOLLOWUP_MAX_PER_DAY`, counted per channel).
+  Events have `channel = "email"`; the address is never written to them.
+  The email explains itself (first test feedback, 2026-10-29): it says it is an automatic reminder from the
+  AP app, why the person gets it (their invoices, waiting N hours/days, not paid or in Excel until acted on),
+  what to do, the daily cap, that it stops by itself, and whom to tell if the invoices aren't theirs.
+- **Who receives it**: the invoice owner's `users.email`, **only when it is listed in `FOLLOWUP_EMAIL_TO`**.
+  Without a login anyone can create a user with any address (the same reason as `REPORT_RECIPIENTS`, D-85), so
+  being a user doesn't make an address safe to mail.
+- **Who sends it**: `FOLLOWUP_EMAIL_SENDER_USER_ID`, else the report's sender (`REPORT_SENDER_USER_ID`, else the
+  first connected Gmail). No connected Gmail = the send fails and is retried like any failure (3 times, then the
+  follow-up closes as unreachable).
+- **A step for a channel the person can't be reached on is skipped and the ladder moves on**, as long as a later
+  step can reach them (no WhatsApp number but an email address: the WhatsApp step is skipped, the email goes).
+  Before, a missing number closed the follow-up at once; that is still what happens when no later step can reach
+  them. A follow-up starts only for people reachable on one of its ladder's channels.
+- **Our reminder must not become an invoice.** It contains "invoice" and amounts, and lands in a watched inbox, so
+  the listener would turn its body into a PDF (D-22, D-81) and the next reminder would list that. Every reminder ends with
+  `outbound.email_marker()` ("ref ap-" + 16 hex of an HMAC keyed with `COMPOSIO_API_KEY`); the listener skips an
+  email without attachments that carries it (outcome `skipped`). Keyed, so a supplier can't add it to a real
+  invoice to hide it; even a leaked marker only hides attachment-less emails.
+- **Not done**: replies. Emails say the reminders stop by themselves once the invoice is dealt with; `1` / `2` /
+  `STOP` stay WhatsApp-only, and `POST /api/v1/followups/{id}/stop` ends a ladder by hand. Reading email replies
+  would mean the listener acting on mail content as commands, which needs a verified sender first (login, Phase 1).
+- **Where**: `app/followup.py` (`address_for`, `reachable_user_ids`, `compose_email`, `_email_sender`, the
+  `no_address` skip), `app/outbound.py` (`send_email`, `email_marker`), `app/gmail.py` (`_ingest_email` skip),
+  `app/config.py`, `tests/test_followup.py`, `tests/test_outbound.py`, `tests/test_gmail_features.py`.

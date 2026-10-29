@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import String, Numeric, ForeignKey, DateTime, Text, Integer, UniqueConstraint, func
+from sqlalchemy import String, Numeric, ForeignKey, DateTime, Text, Integer, Index, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -180,6 +180,69 @@ class ReportRun(Base):
     error: Mapped[str | None] = mapped_column(Text)
     sent_by: Mapped[str] = mapped_column(String(100), default="schedule")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class FollowUp(Base):
+    """One reminder ladder for one invoice and reason: kind "review" (waiting for a person), "export"
+    (approved but not in Excel) or "result" (tell a WhatsApp sender what became of their file).
+    `step` = ladder steps already taken; `next_due_at` is when the next one is due (a snooze or an
+    acknowledgment just moves it later)."""
+    __tablename__ = "follow_ups"
+    __table_args__ = (UniqueConstraint("invoice_id", "kind"), Index("ix_follow_ups_due", "state", "next_due_at"))
+    id: Mapped[int] = mapped_column(primary_key=True)
+    invoice_id: Mapped[int] = mapped_column(ForeignKey("invoices.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(20))
+    target_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    state: Mapped[str] = mapped_column(String(20), default="active")    # active | done
+    done_reason: Mapped[str | None] = mapped_column(String(40))          # resolved | stopped | finished | unreachable
+    step: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    next_due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    awaiting_reply_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class FollowUpEvent(Base):
+    """What was sent, received or skipped, per follow-up: answers "did anyone tell them?"."""
+    __tablename__ = "follow_up_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    follow_up_id: Mapped[int | None] = mapped_column(ForeignKey("follow_ups.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)
+    channel: Mapped[str] = mapped_column(String(20))        # whatsapp | voice
+    direction: Mapped[str] = mapped_column(String(5))       # out | in
+    status: Mapped[str] = mapped_column(String(20))         # sent | dry_run | skipped | failed | reply
+    detail: Mapped[str | None] = mapped_column(Text)        # the reason, or a short note: never a phone number
+    provider_sid: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class VoiceCall(Base):
+    """One follow-up phone call (an AI conversation through Twilio ConversationRelay)."""
+    __tablename__ = "voice_calls"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    follow_up_ids: Mapped[list] = mapped_column(JSONB)       # the follow-ups this call is about
+    call_sid: Mapped[str | None] = mapped_column(String(64), index=True)
+    # placing | dry_run | ringing | in_progress | completed | no_answer | busy | failed | canceled
+    status: Mapped[str] = mapped_column(String(20), default="placing")
+    # handling | remind_later | wrong_person | needs_human | none (nothing was agreed)
+    outcome: Mapped[str | None] = mapped_column(String(20))
+    note: Mapped[str | None] = mapped_column(Text)
+    transcript: Mapped[list | None] = mapped_column(JSONB)   # [{"role": "assistant"|"user", "text": ...}], capped
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class WhatsAppSession(Base):
+    """When a number last wrote to us. WhatsApp allows free-form messages only for 24 hours after that;
+    later ones must be an approved template."""
+    __tablename__ = "whatsapp_sessions"
+    number: Mapped[str] = mapped_column(String(20), primary_key=True)      # +919876543210
+    last_inbound_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 def audit(session, invoice_id: int, stage: str, message: str, data: dict | None = None, actor="system"):
