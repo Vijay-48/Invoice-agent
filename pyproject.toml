@@ -1,0 +1,23 @@
+[project]
+name = "invoice-ap"
+version = "0.1.0"
+description = "Accounts-payable invoice processing: Gmail, upload and WhatsApp intake, AI extraction, checks, review, Excel register"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 140
+target-version = "py312"
+extend-exclude = ["golden/docs", "storage", "output", "reports"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+ignore = [
+    "B008",   # FastAPI's Depends()/File()/Query() in argument defaults is the framework's style
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "scripts", "tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E741"]   # short names (l, i) in small test helpers
+"tests/conftest.py" = ["E402", "E741"]   # the environment is pinned before the app is imported

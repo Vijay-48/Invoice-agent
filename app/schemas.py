@@ -57,6 +57,8 @@ class ExtractedInvoice(BaseModel):
     round_off: float
     grand_total: float
     amount_in_words: str | None = Field(description="the total as written in words, exactly as printed; null if none")
+    supplier_bank_account: str | None = Field(description="the supplier's account number for payment, as printed; null if none")
+    supplier_ifsc: str | None = Field(description="the 11-character IFSC of that account; null if none")
     confidence: float = Field(description="0 to 1")
     low_confidence_fields: list[str]
     _model: str = PrivateAttr(default="")   # which AI model read it (not part of the AI schema)
@@ -77,6 +79,7 @@ def from_stored(data: dict) -> ExtractedInvoice:
     """Rebuild a stored extraction; fills fields added after it was stored."""
     return ExtractedInvoice(**{"voucher_number": None, "voucher_date": None, "invoice_kind": "regular",
                                "reference_invoice_number": None, "currency": "INR", "amount_in_words": None,
+                               "supplier_bank_account": None, "supplier_ifsc": None,
                                "hsn_summary": [],
                                **data})
 
@@ -95,6 +98,8 @@ class InvoiceCorrection(BaseModel):
     currency: str | None = None
     place_of_supply_state_code: str | None = None
     po_number: str | None = None
+    supplier_bank_account: str | None = None
+    supplier_ifsc: str | None = None
     lines: list[ExtractedLine] | None = None
     taxable_total: float | None = None
     cgst: float | None = None

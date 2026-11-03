@@ -416,6 +416,7 @@ class _StuckSub:
 def _run(monkeypatch, subs, seconds):
     import threading
     import time as _time
+
     from app import gmail_listener
     syncs = []
     monkeypatch.setattr(gmail_listener, "sync_all", lambda: syncs.append(_time.monotonic()) or True)

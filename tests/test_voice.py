@@ -12,8 +12,8 @@ from twilio.request_validator import RequestValidator
 from app import voice
 from app.config import settings
 from app.models import FollowUp, Invoice, Status, VoiceCall
-from tests.test_flow import client   # noqa: F401 (fixture)
-from tests.test_followup import MIN, NOW, NUMBER, clock, make_invoice, on, sent   # noqa: F401 (fixtures)
+from tests.test_flow import client  # noqa: F401 (fixture)
+from tests.test_followup import MIN, NOW, NUMBER, clock, make_invoice, on, sent  # noqa: F401 (fixtures)
 
 TOKEN = "test-token-not-real"
 CALL_SID = "CA" + "a" * 32

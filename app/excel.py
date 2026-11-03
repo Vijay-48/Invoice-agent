@@ -27,8 +27,9 @@ from openpyxl.utils import get_column_letter
 from sqlalchemy import select, text, update
 from sqlalchemy.orm import Session
 
+from app import payables
 from app.config import settings
-from app.models import Invoice, User, Status, audit
+from app.models import Invoice, Status, User, audit
 
 log = logging.getLogger("excel")
 EXCEL_LOCK = 3   # pg advisory lock namespace: one writer at a time across processes
@@ -44,6 +45,7 @@ INVOICE_COLUMNS = [  # (header, width, number format)
     ("Document", 14, None),   # new columns go at the end so existing workbooks stay aligned
     ("Voucher No", 12, None), ("Voucher Date", 12, DATE),
     ("Invoice Type", 16, None), ("Ref Invoice", 18, None), ("Currency", 8, None), ("IRN", 30, None),
+    ("Due Date", 12, DATE), ("TDS Section", 10, None), ("TDS", 12, MONEY), ("Net Payable", 14, MONEY),
 ]
 LINE_COLUMNS = [
     ("Invoice ID", 10, None), ("Invoice No", 18, None), ("Supplier", 32, None), ("#", 5, None),
@@ -198,12 +200,14 @@ def _rows(inv: Invoice, user: User | None):
         d.get("voucher_number"), _as_date(d.get("voucher_date")),
         (d.get("invoice_kind") or "regular").replace("_", " "), d.get("reference_invoice_number"),
         d.get("currency") or "INR", d.get("irn"),
+        inv.due_date, inv.tds_section if inv.tds_amount else None,
+        float(inv.tds_amount) if inv.tds_amount else None, payables.net_payable(inv),
     ]
     line_rows = [
-        [inv.id, d["invoice_number"], d["supplier_name"], i, l["description"], l["hsn_sac"],
-         amt(l["quantity"]), l["unit_price"], amt(l["taxable_value"]), l["gst_rate"],
-         amt(round(l["taxable_value"] * l["gst_rate"] / 100, 2))]
-        for i, l in enumerate(d["lines"], start=1)
+        [inv.id, d["invoice_number"], d["supplier_name"], i, ln["description"], ln["hsn_sac"],
+         amt(ln["quantity"]), ln["unit_price"], amt(ln["taxable_value"]), ln["gst_rate"],
+         amt(round(ln["taxable_value"] * ln["gst_rate"] / 100, 2))]
+        for i, ln in enumerate(d["lines"], start=1)
     ]
     return [_safe(v) for v in invoice_row], [[_safe(v) for v in r] for r in line_rows]
 

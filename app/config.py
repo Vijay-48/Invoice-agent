@@ -5,6 +5,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "postgresql+psycopg://ap:ap@localhost:5432/ap"
+    migrate_on_start: bool = True               # apply database migrations on start (app/migrate.py)
+    # Shared secret every API request must carry (X-API-Key); empty = open to anyone who can reach the
+    # server. Webhooks, health checks and the Gmail callback don't need it (app/security.py)
+    api_key: str = ""
     storage_dir: str = "./storage"              # original invoice files
     excel_path: str = "./output/invoices.xlsx"  # approved invoices are appended here...
     excel_per_financial_year: bool = True       # ...as "invoices FY2026-27.xlsx", one per financial year
@@ -21,6 +25,14 @@ class Settings(BaseSettings):
     company_gstin: str = ""             # your GSTIN(s), comma-separated; empty = don't check.
                                         # Other-state GSTINs with the same PAN also count as yours.
     auto_approve_limit: float = 50000   # correct invoices above this still need approval
+    # Approval matrix (D-108). Each user's own limit is users.approval_limit.
+    second_approval_above: float = 0    # invoices above this need two approvers; 0 = one is enough
+    maker_checker: bool = False         # who uploaded/sent or corrected an invoice may not approve it
+    # Payables (D-110): due date = invoice date + the supplier's terms, else this many days
+    payment_days: int = 30
+    msme_payment_days: int = 45         # MSMED Act s.15: at most 45 days for micro and small suppliers...
+    msme_default_days: int = 15         # ...and 15 days when no terms are agreed
+    tds_checks: bool = True             # suggest a TDS section and amount (app/pipeline/tax.py, D-109)
     amount_tolerance: float = 1.0       # rupees, for rounding differences
     min_confidence: float = 0.85        # extraction confidence floor
     max_pages: int = 5                  # longer PDFs: first and last page plus the pages with most amounts
@@ -112,6 +124,9 @@ class Settings(BaseSettings):
     # (comma-separated). Sent from a connected Gmail: this user's, 0 = REPORT_SENDER_USER_ID's / the first
     followup_email_to: str = ""
     followup_email_sender_user_id: int = 0
+    # Signs the one-click links in reminder emails ("I'm handling it" / "Remind me later" / "Stop"); empty =
+    # COMPOSIO_API_KEY is used. The links point at PUBLIC_BASE_URL: without it the emails have no buttons.
+    action_link_secret: str = ""
     followup_batch: int = 50                     # follow-ups handled per check
     twilio_whatsapp_from: str = ""               # "whatsapp:+14155238886" (sandbox) or your approved sender
     # Content template (HX...) for messages outside WhatsApp's 24-hour window; empty = those are skipped.

@@ -9,7 +9,7 @@ from app import excel, worker
 from app.config import settings
 from app.models import Status
 from tests.conftest import make_extracted
-from tests.test_flow import client, fake_extract, get, run_worker, upload   # noqa: F401 (fixtures)
+from tests.test_flow import client, fake_extract, get, run_worker, upload  # noqa: F401 (fixtures)
 
 
 def _ids(fy):

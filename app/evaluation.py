@@ -23,7 +23,7 @@ from difflib import SequenceMatcher
 from app.models import Invoice, Status
 from app.pipeline.decide import decide
 from app.pipeline.journal import JOURNAL
-from app.pipeline.validate import validate, normalize_extracted, normalize_invoice_no
+from app.pipeline.validate import normalize_extracted, normalize_invoice_no, validate
 from app.schemas import ExtractedInvoice
 
 MONEY = {"taxable_total", "cgst", "sgst", "igst", "round_off", "grand_total"}
@@ -112,7 +112,7 @@ def _compare_lines(expected: list[dict], actual: list) -> FieldResult:
     problems = []
     if len(actual) != len(expected):
         problems.append(f"{len(actual)} line(s), expected {len(expected)}")
-    for i, (e, a) in enumerate(zip(expected, actual), start=1):
+    for i, (e, a) in enumerate(zip(expected, actual, strict=False), start=1):
         a = a.model_dump() if hasattr(a, "model_dump") else a
         for key, tol in LINE_KEYS.items():
             if key not in e:

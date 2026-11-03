@@ -124,6 +124,7 @@ def test_correction_keeps_the_qr_check(monkeypatch):
     """A reviewer's PATCH re-runs the checks: the e-invoice QR comparison must survive (re-done against
     the corrected values), not silently disappear."""
     from fastapi.testclient import TestClient
+
     from app import worker
     from app.api import app
     from app.db import SessionLocal

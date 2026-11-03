@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Invoice, Status
-from app.pipeline.checks import Check, PASS, WARN, FAIL
+from app.pipeline.checks import FAIL, PASS, WARN, Check
 from app.pipeline.journal import doc_type as journal_doc_type
 from app.pipeline.words import parse_amount
 from app.schemas import ExtractedInvoice
@@ -66,6 +66,8 @@ def normalize_extracted(data: ExtractedInvoice) -> ExtractedInvoice:
         "reference_invoice_number": (data.reference_invoice_number or "").strip() or None,
         "currency": (data.currency or "").strip().upper() or "INR",
         "po_number": (data.po_number or "").strip() or None,
+        "supplier_bank_account": re.sub(r"[\s.-]", "", data.supplier_bank_account or "").upper() or None,
+        "supplier_ifsc": re.sub(r"[\s-]", "", data.supplier_ifsc or "").upper() or None,
         "place_of_supply_state_code": state_code(data.place_of_supply_state_code),
     })
 
@@ -113,8 +115,8 @@ def arithmetic_checks(data: ExtractedInvoice) -> list[Check]:
         if not _close(computed, line.taxable_value) and abs(computed - line.taxable_value) > 0.005 * abs(line.taxable_value):
             checks.append(Check(f"line_{idx}", FAIL, f"'{line.description}': {line.quantity:g} x "
                                 f"{line.unit_price:.2f} = {computed:.2f}, document says {line.taxable_value:.2f}"))
-    line_taxable = sum(l.taxable_value for l in data.lines)
-    expected_tax = sum(l.taxable_value * l.gst_rate / 100 for l in data.lines)
+    line_taxable = sum(ln.taxable_value for ln in data.lines)
+    expected_tax = sum(ln.taxable_value * ln.gst_rate / 100 for ln in data.lines)
     actual_tax = data.cgst + data.sgst + data.igst
     computed_total = data.taxable_total + actual_tax + data.round_off
     for name, a, b in [("line_total", line_taxable, data.taxable_total),
@@ -150,11 +152,11 @@ def hsn_summary_checks(data: ExtractedInvoice, actual_tax: float) -> list[Check]
             by_code[code] = by_code.get(code, 0.0) + row.taxable_value
     for code, summary_taxable_code in by_code.items():
         # A summary may list 4 digits where the lines show 8: one is a prefix of the other
-        matching = [l for l in data.lines if _digits(l.hsn_sac)
-                    and (_digits(l.hsn_sac).startswith(code) or code.startswith(_digits(l.hsn_sac)))]
+        matching = [ln for ln in data.lines if _digits(ln.hsn_sac)
+                    and (_digits(ln.hsn_sac).startswith(code) or code.startswith(_digits(ln.hsn_sac)))]
         if not matching:
             continue
-        line_taxable = sum(l.taxable_value for l in matching)
+        line_taxable = sum(ln.taxable_value for ln in matching)
         if not _close(line_taxable, summary_taxable_code):
             problems.append(f"HSN {code}: lines add up to {line_taxable:.2f}, summary says {summary_taxable_code:.2f}")
     if problems:

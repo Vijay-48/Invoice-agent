@@ -115,7 +115,7 @@ def send_email(sender, to: str, subject: str, html: str) -> Result:
         return Result("dry_run")
     if sender is None:
         return Result("failed", detail="no connected Gmail to send from (FOLLOWUP_EMAIL_SENDER_USER_ID)")
-    from app import gmail   # here, not at the top: gmail imports this module
+    from app import gmail  # here, not at the top: gmail imports this module
     try:
         gmail.send_email(sender, [to], subject, html)
         return Result("sent")

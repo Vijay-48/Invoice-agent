@@ -24,7 +24,8 @@ Dates are when the decision was made (approximate for the first days of the proj
   "Invoices" (one row per document) and "Line Items" (one row per line).
 - **Why**: The business asked for Excel now and Tally later. A workbook can be opened by anyone, needs
   no ERP access, and is easy to check by hand.
-- **Instead of**: Tally XML import, or Markdown ledgers per user (the previous version, now in `legacy_v1/`).
+- **Instead of**: Tally XML import, or Markdown ledgers per user (the previous version, in `legacy_v1/` until
+  D-101 removed it; it is in git history).
 - **Trade-off**: A file is not a database. Concurrent writers need a lock (D-24), the file can be open in
   Excel (writes wait), and edits made in Excel never come back to the system. The roadmap (Phase 5)
   plans "database as the register, Excel generated from it".
@@ -116,7 +117,7 @@ Dates are when the decision was made (approximate for the first days of the proj
   rules are in D-31.
 - **Where**: `app/gmail_listener.py` (`_periodic_sync`), `app/gmail.py` (`sync_user`, `reconcile_user`).
 
-### D-14 Tables are created with `create_all`; no migrations yet (≈ 2026-10-06)
+### D-14 Tables are created with `create_all`; no migrations yet (≈ 2026-10-06; superseded by D-102)
 
 - **Decision**: The schema is created on startup and never altered automatically.
 - **Why**: Fast iteration while the schema settles.
@@ -1024,3 +1025,255 @@ Known limits, not fixed (need a decision or are acceptable for now):
 - **Where**: `app/followup.py` (`address_for`, `reachable_user_ids`, `compose_email`, `_email_sender`, the
   `no_address` skip), `app/outbound.py` (`send_email`, `email_marker`), `app/gmail.py` (`_ingest_email` skip),
   `app/config.py`, `tests/test_followup.py`, `tests/test_outbound.py`, `tests/test_gmail_features.py`.
+
+## 15. Production hardening (2026-10-30)
+
+### D-101 Repository clean-up, lint gate, pinned dependencies, CI
+
+- **Removed**: `legacy_v1/` (the previous version: PO matching, Markdown ledgers; nothing imported it, the README
+  already called it safe to delete), a stray file `0` (the output of a mistyped shell redirect),
+  `ingest.is_supported` (never called), and `setup_db --reset`, which treated a `purchase_orders` table as "the
+  old version" and offered to drop the whole schema: that would have fired once PO matching is built.
+- **Untracked**: `ngrok.exe` (33 MB, a developer tool) is no longer in git and `*.exe` is ignored. It stays in the
+  history of `fb48be9`; rewriting pushed history was judged not worth breaking everyone's clones.
+- **Moved**: the planning chat, workflow notes, mermaid diagrams and a screenshot to `docs/planning/`.
+- **Lint**: ruff (`pyproject.toml`): pyflakes, pycodestyle, import order, bugbear. `B008` (FastAPI's `Depends()` in
+  defaults) is ignored as the framework's style; lines up to 140 (the code's existing width, so the gate didn't
+  churn 56 lines). Fixed on the way: ambiguous `l` names, `raise ... from` in four `except` blocks, import order.
+- **Pinned**: `requirements.txt` holds exact versions (the ones the tests pass with); `requirements-dev.txt` adds
+  pytest and ruff. An upgrade is a deliberate change: edit the pin, run the tests and the golden set.
+- **CI**: `.github/workflows/ci.yml` runs ruff and pytest against PostgreSQL 17 on pushes to `main` and on pull
+  requests. Not yet seen running on GitHub (written 2026-10-30; first run after the push).
+- **Where**: `pyproject.toml`, `requirements*.txt`, `.github/workflows/ci.yml`, `.gitignore`, `scripts/setup_db.py`.
+
+### D-102 Database migrations with Alembic, applied on start
+
+- **Why**: D-14's `create_all` never changes an existing table, so every new column so far had to become a new
+  table, and PO/GRN work (branches on invoices, links between tables) needs real schema changes.
+- **What**: `migrations/` with one baseline revision (`0001`, every table as of 2026-10-30, generated from
+  `app/models.py` and checked with `alembic check` against the live `ap` database: no differences).
+  `app/migrate.py` upgrades to the latest revision on start of the API, the worker and the Gmail listener
+  (`MIGRATE_ON_START=true`), inside a Postgres advisory lock so processes starting together migrate one at a time.
+- **Existing databases**: one that has the tables but no `alembic_version` (made by `create_all`) is stamped at
+  `0001` first, then upgraded. That is only safe because no table was ever altered by hand (checked: no `ALTER`
+  anywhere) and the live schema matched the models exactly.
+- **Tests**: the suite still builds its schema with `create_all` (fast; `MIGRATE_ON_START=false` in conftest);
+  `tests/test_migrations.py` builds it from the migrations and fails if `app/models.py` and the migrations differ,
+  so forgetting a migration breaks CI.
+- **Instead of**: running `alembic upgrade` only as a deploy step. Kept possible (`MIGRATE_ON_START=false`,
+  `python -m app.migrate`); on start is simpler for a single-server install.
+- **Where**: `alembic.ini`, `migrations/`, `app/migrate.py`, `app/api.py` (`lifespan`), `app/worker.py`,
+  `app/gmail_listener.py`, `scripts/setup_db.py`, `tests/test_migrations.py`.
+
+### D-103 A shared API key, and health checks
+
+- **Why**: with no login (an earlier product decision), anyone who can reach the server can send `X-User-Id: 1`
+  and approve invoices. A full login is the Phase 1 plan; until then a shared key closes the door.
+- **What**: `API_KEY` in `.env`. When set, every request needs `X-API-Key: <key>` or `Authorization: Bearer
+  <key>` (compared in constant time), checked by a plain ASGI middleware so WebSockets are covered too. Open:
+  `/healthz`, `/readyz`, Twilio's `/api/v1/webhook/...` (signed; the call's WebSocket has its own token),
+  Composio's `/webhooks/composio` (signed) and the Gmail consent callback (a browser redirect). Empty `API_KEY`
+  keeps the API open (local development) and logs a warning on start.
+- **Not a login**: everyone with the key can still act as any user; `X-User-Id` still names the actor in the audit
+  log. The demo frontend's proxy (`server.py`, a separate folder) must add the header once a key is set.
+- **Health checks**: `GET /healthz` (process up) and `GET /readyz` (`SELECT 1`; 503 when the database doesn't
+  answer), without the key, for a load balancer or uptime monitor.
+- **Where**: `app/security.py`, `app/api.py`, `app/config.py`, `tests/test_security.py`.
+
+## 16. Supplier master and bank details (2026-11-02)
+
+### D-104 A supplier master that holds the bank account, and a hold when an invoice shows another one
+
+- **Why**: a changed bank account on an invoice (a forged or hacked invoice from a real supplier) is the most
+  common invoice fraud, and nothing stopped it: the app didn't even read bank details. Payments, MSME due dates
+  and PO matching will all need one record per supplier, so the master comes first.
+- **What is read**: two new extraction fields, `supplier_bank_account` and `supplier_ifsc` (one instruction line;
+  normalised: spaces, dots and dashes removed, upper case). Reviewers can correct them like any field.
+- **The master**: table `suppliers`, one row per valid GSTIN, created when its first invoice is approved (auto or
+  by a person): name, PAN (GSTIN characters 3-12), and the bank account with who set it and when. Table
+  `supplier_events` keeps what happened (created, bank_recorded, bank_confirmed) with the before/after values.
+  Migration `0002` creates both and adds one row per GSTIN that already had approved invoices (the most used
+  name; no bank details, since older readings didn't extract them).
+- **Trust on first use**: the first approved invoice that shows an account sets it. Accepted risk: if that very
+  first invoice is forged, the forged account is recorded. A person can correct it (below), and the alternative,
+  a person entering every supplier's account by hand first, isn't how the team works today.
+- **The check** (`bank_details`, every invoice with an account and a GSTIN): first account seen = PASS (noted);
+  same account = PASS; a different account (or the same account with a different IFSC) = **FAIL**, so the invoice
+  goes to review with the advice to confirm on a phone number already on file, never one on the invoice. A
+  malformed IFSC is a WARN (`bank_ifsc`).
+- **The hold**: `POST /invoices/{id}/approve` is refused (409) while the invoice's account differs from the
+  recorded one, asked again at approval time, not taken from the stored check. Two ways forward: correct the
+  field if the AI misread it, or record the new account with `POST /api/v1/suppliers/{gstin}/bank` (account, IFSC,
+  a note of at least 10 characters on how it was confirmed, optionally the invoice). Approving never changes a
+  recorded account; only that endpoint does, and it is audited on the supplier and the invoice.
+- **Account numbers in messages** are masked to the last four (`XXXX5678`) in checks, reasons, audit lines and
+  logs; the full values are only in the supplier row and its events. (A bullet `••••` mask was tried first: the
+  Windows console printed it as `????`.)
+- **Found while building**: `INSERT ... ON CONFLICT DO NOTHING` returned rowcount -1 under psycopg, so "was it
+  created?" read as true every time; `RETURNING id` is used instead.
+- **Not done**: no segregation of duties yet (the person who confirms a new account may approve the invoice; needs
+  roles, Phase 1); no bank-account verification service (penny drop); no screen in the demo frontend for confirming.
+- **Where**: `app/pipeline/supplier.py` (`check_bank`, `bank_hold`, `record_approved`, `confirm_bank`),
+  `app/pipeline/evaluate.py`, `app/api.py` (`/suppliers`, `/suppliers/{gstin}`, `/suppliers/{gstin}/bank`, approve),
+  `app/schemas.py`, `app/pipeline/validate.py` (normalising), `app/pipeline/extract.py` (instruction),
+  `app/models.py`, `migrations/versions/*0002*`, `tests/test_supplier_master.py`.
+
+## 17. GSTR-2B reconciliation (2026-11-02)
+
+### D-105 Reconcile each month's GSTR-2B with the approved invoices; compute matches when asked
+
+- **Why**: input tax credit can only be claimed for invoices the supplier reported (GSTR-2B). An approved invoice
+  missing from it, or reported with less tax, is credit the company loses unless the supplier files or corrects
+  it. Accountants do this comparison by hand in Excel every month.
+- **Input**: the GSTR-2B JSON downloaded from the GST portal (`POST /api/v1/gstr2b`). Sections read: `b2b`, `b2ba`
+  (invoices), `cdnr`, `cdnra` (credit/debit notes); amounts given per document or, in older layouts, per item.
+  Built from the published layout and tested with files made to it; **not yet tried with a real download**. The
+  Excel version of GSTR-2B is not read (JSON is the exact one).
+- **Checks on upload**: it must be a GSTR-2B (a valid GSTIN and `rtnprd`), and for one of `COMPANY_GSTIN`. The same
+  GSTIN and month uploaded again replaces the earlier upload.
+- **Only the documents are stored** (`gstr2b_returns`, `gstr2b_documents`); the match with invoices is computed each
+  time the reconciliation is read. So an invoice approved after the upload, or a September invoice the supplier
+  filed late and that appears in October's GSTR-2B, is accounted for without uploading again. Instead of storing
+  match results, which would go stale. Cost: each read re-matches one month (indexed by supplier GSTIN + number).
+- **Our side**: invoices APPROVED/EXPORTED, billed to the return's GSTIN (the buyer GSTIN as read; invoices to another
+  GSTIN belong to that GSTIN's return), not journal vouchers.
+- **Matching**: supplier GSTIN + invoice number without punctuation or case (`SLS/26-27/118` = `SLS-26-27-118`);
+  failing that, the same supplier, date and total within ₹1 (`matched_by` says which). Amounts agree when taxable
+  value and total tax are each within ₹1.
+- **Results**: matched; mismatch (with both amounts); in 2B but not in the app (an invoice never received, or not
+  yet approved); and **missing from 2B**: our invoices dated in that month that no uploaded GSTR-2B of any month
+  lists. **ITC at risk** = tax on invoices missing from 2B + tax filed lower than ours + tax on matched invoices
+  the portal marks "ITC not available". Credit notes count negative. `suppliers_to_chase` lists the GSTINs.
+- **Output**: `GET /api/v1/gstr2b` (each month with its summary), `GET /api/v1/gstr2b/{id}` (every document,
+  `?status=` to filter), `GET /api/v1/gstr2b/{id}/excel` (a workbook: summary + documents), `DELETE` to remove.
+- **Not done**: reminding suppliers to file (the follow-up engine could, once supplier contacts are in the
+  master); the Excel GSTR-2B format; GSTR-2A; claiming decisions (what to claim is the accountant's call).
+- **Where**: `app/gstr2b.py`, `app/api.py` (`/gstr2b`), `app/models.py`, `migrations/versions/*0003*`,
+  `tests/test_gstr2b.py`.
+
+## 18. WhatsApp receiving and email reminders, improved (2026-11-02)
+
+### D-106 WhatsApp: a message log, retries of failed downloads, numbers stored on users, STATUS and HELP
+
+Refines D-97 and D-98. Still Twilio, still incoming only unless follow-ups are on.
+- **Message log**: every incoming message is a row in `whatsapp_messages` (Twilio's MessageSid, unique; the sender
+  masked; the user or none; `files` / `text` / `ignored`; text length and attachment count, **never the text**).
+  Each attachment of a known sender is a row in `whatsapp_media`: `pending` → `ingested` (with the invoice) |
+  `duplicate` | `rejected` (and why) | `failed` (tried again at `next_try_at`) | `gave_up`.
+  `GET /api/v1/whatsapp/messages` shows it. Before, a rejected attachment was only in the logs.
+- **Twilio sending a message twice is handled once**: the second insert of the same MessageSid does nothing, and
+  the webhook answers without downloading again. Before, the file hash still kept one invoice, but the file was
+  downloaded twice and the sender got two receipts. If the log can't be written (database down), the message is
+  still handled as before: the invoice matters more than the log.
+- **Retries**: a download that failed for a passing reason (network error, Twilio 5xx/429, slower than 60 s,
+  database error on ingest) is tried again after 2, 10 and 30 minutes (4 attempts in all), then `gave_up`. A file
+  that is not usable (type, size, content) is `rejected` and not retried. A row still `pending` after 15 minutes
+  (the process stopped mid-way) is retried too. The loop (`whatsapp.run_retries`) starts with the API when
+  `TWILIO_ACCOUNT_SID` and `TWILIO_AUTH_TOKEN` are set; rows are claimed with `SKIP LOCKED` and a lease.
+  `POST /api/v1/whatsapp/media/{id}/retry` queues one again by hand (e.g. after raising `MAX_UPLOAD_MB`).
+  The media URL is kept for this; it is Twilio's API URL, useless without our credentials.
+- **Numbers on users**: `users.whatsapp_number` (unique), set with `PUT /api/v1/users/{id}/whatsapp`, removed with
+  `DELETE`. It takes effect at once, without a restart. It is checked before `WHATSAPP_SENDERS`, which keeps working.
+  Reminders and calls use it too. The API shows it masked.
+- **Telling the sender why** (only when follow-ups are on, as before): an unusable file gets the reason meant for
+  a person ("that file type isn't supported: send a PDF, a photo...", "it is larger than 20 MB", "the file seems
+  damaged"), never the technical one. A passing failure gets "I will try again in a few minutes; no need to send
+  it again", once; giving up asks for it again.
+- **STATUS** (also `pending`, `list`) answers with the sender's own invoices waiting for review (five lines,
+  oldest first, with the reason) and how many are still being read. **HELP** (`menu`, `?`) lists the commands.
+  Both are read-only. Approving and rejecting stay in the app.
+- **Instead of**: storing message text (needed only for a chat history; kept out on purpose, as in D-97); AI
+  reading of free text (fixed words are predictable and free, as in D-98); the Meta Cloud API (the user is still
+  evaluating it; the log and retry design carries over).
+- **Where**: `app/whatsapp.py` (`record_message`, `stored_sender`, `handle_media`, `save_media_result`,
+  `process_media`, `retry_due`, `retry_now`, `run_retries`), `app/followup.py` (`number_for`, `status_text`,
+  `notify_unreadable`, `notify_retrying`), `app/api.py`, `app/background.py`, `app/models.py`,
+  `migrations/versions/*0004*`, `tests/test_whatsapp_log.py`, `tests/test_followup.py`,
+  `tests/test_whatsapp_webhook.py` (keeps "no database": the new functions are faked there).
+
+### D-107 One-click choices in reminder emails, made by a POST
+
+Refines D-100 ("emails take no replies").
+- **What**: each reminder email has three buttons: **I'm handling it** (pause `FOLLOWUP_ACK_HOURS`), **Remind me
+  later** (`FOLLOWUP_SNOOZE_HOURS`), **Stop these reminders**. The same three choices as WhatsApp's 1 / 2 / STOP,
+  and like them they **only move reminders**: they never approve, reject or change an invoice.
+- **The link**: `PUBLIC_BASE_URL/api/v1/followups/action?t=...`. The token holds the person, the follow-ups that
+  email was about, the choice and an expiry (7 days), signed (HMAC-SHA256) with `ACTION_LINK_SECRET`, else
+  `COMPOSIO_API_KEY` (already needed to send the email). A changed, expired or garbled link does nothing (400/410
+  page). A valid link only touches its own follow-ups, of the person it was sent to.
+- **Opening the link changes nothing**: it shows what the choice does and a Confirm button; the choice is the
+  POST. Mail security scanners (Outlook Safe Links, Gmail) open links in emails, and would otherwise make the
+  choice for the person.
+- **Why the route is open**: the person clicks from a mail app, which can't send `X-API-Key`. The signed token is
+  the authority, so `/api/v1/followups/action` is on the open list in `app/security.py`.
+- **No public address, no buttons**: without `PUBLIC_BASE_URL` (or with no key) the email is as before.
+- **Trade-off**: anyone holding the email can press the buttons (forwarded email). The worst they can do is
+  pause or stop reminders, which the ladder's other steps and the app's review list still show.
+- **Instead of**: reading email replies (the listener would act on mail content as commands, D-100 "not done").
+- **Where**: `app/followup.py` (`action_token`, `read_action_token`, `action_links`, `describe_action`,
+  `apply_action`, `action_page`, `compose_email`), `app/api.py`, `app/security.py`, `app/config.py`,
+  `tests/test_followup.py`.
+
+## 19. Approval matrix, tax treatment and payables (2026-11-03)
+
+The partly built stages of the plan in `docs/planning/` (stages 4 to 8 of its invoice-to-close table), brought to a
+working first version. Still no login (approvals are by `X-User-Id`), no PO/GRN, Excel not Tally.
+
+### D-108 Approval matrix: limits per person, two approvers above an amount, maker-checker
+
+Refines D-02 (auto-approve up to `AUTO_APPROVE_LIMIT`), which stays as it is for invoices that pass every check.
+- **Each user's limit**: `users.approval_limit` (`PUT /api/v1/users/{id}/approval-limit`). Empty = any amount (as
+  before, so nothing changes until limits are set); 0 = may not approve. A total above the limit gets 403 with
+  the reason.
+- **Two approvers**: above `SECOND_APPROVAL_ABOVE` (0 = off) the first approval is recorded in `approvals` and the
+  invoice stays `NEEDS_REVIEW` with "Approved by X (1 of 2)"; a different person's approval completes it.
+  `approved_by` then names both. Each approver's own limit must cover the total: the simple, strict reading;
+  "the last approver's limit covers it" would let a junior give the first approval and is a later choice.
+- **Maker-checker** (`MAKER_CHECKER=true`): the person who uploaded or sent the invoice on WhatsApp, or corrected
+  it, can't approve it. A Gmail invoice's inbox owner is not its maker (the supplier sent it). The correction is
+  matched by user id, now kept in the `correct` audit entry, not by name.
+- **Approvals are cleared** when the invoice is corrected or read again: they were given for other values.
+- **Not done**: roles; who may set limits (anyone, until there is a login); approval by cost centre or branch
+  (no cost centres yet); an `APPROVAL_PENDING` status (the reason text carries it, so no screen or report changes).
+- **Where**: `app/api.py` (`_may_approve`, `approvals_needed`, `approve`), `app/models.py` (`Approval`,
+  `User.approval_limit`), `app/config.py`, `tests/test_ap_controls.py`.
+
+### D-109 Tax treatment from the HSN/SAC codes: TDS, reverse charge, blocked credit
+
+- **Plain rules, no AI**: `app/pipeline/tax.py` holds the tables (`TDS_RULES`, `RCM_RULES`, `BLOCKED_ITC`) and a
+  `RULES_VERSION` stored in each decision's audit. **They are a starting point for the CA to confirm**: rates and
+  thresholds as understood on 2026-11-03 (Finance Act 2025).
+- **TDS** (`tds` check): the section of the lines' SAC codes (194C contract work, 194J professional/technical,
+  194I rent, 194H commission), the rate by the PAN in the supplier's GSTIN (194C: 1% individual/HUF, 2% others;
+  20% when there is no PAN), on the taxable value (GST excluded). Thresholds: one invoice, or the supplier's
+  approved invoices of the financial year in the same section. The section, base, rate and amount are stored on
+  the invoice (`tds_*`), shown in the API and Excel, and taken off the net payable.
+  Information (PASS) normally, so it doesn't send every service invoice to review; WARN when a person must act:
+  no PAN, or this invoice takes the year over the threshold (TDS is then due on the earlier invoices too).
+- **Reverse charge** (`rcm`, WARN): a line for GTA transport, an advocate's legal services, security services or
+  renting a residential dwelling with **no GST charged**: the company pays that GST itself.
+- **Blocked credit** (`itc_blocked`, WARN): GST on motor cars and motorcycles, food and beverages, health and
+  beauty services, construction work (section 17(5)): booked as cost unless an exception applies.
+- **Not done**: 194Q (goods; needs the company's turnover), lower-deduction certificates, 195 (non-residents),
+  206AB, the 194J 2% technical-services rate (mentioned in the message), TDS returns and challans.
+- **Where**: `app/pipeline/tax.py`, `app/pipeline/evaluate.py`, `tests/test_ap_controls.py`.
+
+### D-110 Payables: due dates, MSME terms, payments marked, AP ageing
+
+- **Due date** = invoice date + the supplier's `payment_terms_days`, else `PAYMENT_DAYS` (30). Set when the invoice
+  is checked, and again for the supplier's unpaid invoices when its terms change. Credit notes and journals have
+  none. Migration 0005 gives already approved invoices invoice date + 30.
+- **MSME** (`PUT /api/v1/suppliers/{gstin}/terms`: terms, `micro|small|medium`, Udyam number): a micro or small
+  supplier must be paid within the agreed terms but at most `MSME_PAYMENT_DAYS` (45), or `MSME_DEFAULT_DAYS` (15)
+  when nothing is agreed (MSMED Act section 15). Late payment costs interest and the income tax deduction that
+  year (43B(h)). The invoice date stands in for the acceptance date: the earlier, safer one.
+- **Paid**: `POST /api/v1/invoices/{id}/payment` (date, UTR or cheque number) records a payment made in the bank;
+  `DELETE` undoes a mistake. Only approved invoices; not in the future; audited. The app never pays.
+- **Ageing**: `GET /api/v1/payables/ageing` per supplier: not due, 1-30, 31-60, 61-90, over 90 days past due, and
+  credit notes, net of TDS, plus **MSME invoices past their due date**. `GET /api/v1/payables/due?days=7` is the
+  payment run's list. Excel gets Due Date, TDS Section, TDS and Net Payable columns, added at the end so existing
+  workbooks stay aligned.
+- **Not done**: part payments; payment batches and approval of payments; bank files; the due date printed on the
+  invoice (needs a new extraction field and the golden set re-run); reminders before MSME due dates.
+- **Where**: `app/payables.py`, `app/api.py`, `app/excel.py`, `app/models.py`,
+  `migrations/versions/*0005*`, `tests/test_ap_controls.py`.

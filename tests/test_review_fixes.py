@@ -14,8 +14,7 @@ from app.pipeline.extract import AIServiceUnavailable
 from app.pipeline.validate import normalize_extracted
 from tests.conftest import make_extracted
 from tests.test_assistant import FakeStreamAgent, sse_events
-from tests.test_flow import client, fake_extract, get, h, run_worker, upload   # noqa: F401 (fixtures)
-
+from tests.test_flow import client, fake_extract, get, h, run_worker, upload  # noqa: F401 (fixtures)
 
 # ---------- worker
 
@@ -82,7 +81,8 @@ def test_unregistered_suppliers_are_not_duplicates_of_each_other(client, users, 
 def _inv(data, **kw):
     d = normalize_extracted(data).model_dump()
     return SimpleNamespace(id=1, extracted=d, invoice_date=d["invoice_date"], approved_by="auto",
-                           approved_at=None, source="gmail", sender=kw.get("sender"), original_filename="x.pdf")
+                           approved_at=None, source="gmail", sender=kw.get("sender"), original_filename="x.pdf",
+                           grand_total=d["grand_total"], due_date=None, tds_section=None, tds_amount=None)
 
 
 def test_excel_text_is_made_safe():

@@ -1,5 +1,6 @@
 # ruff: noqa: F811  (pytest fixtures imported from test_flow)
 """Follow-up WhatsApp messages and calls (app/followup.py, app/outbound.py). Twilio is faked: nothing is sent."""
+import re
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -8,7 +9,7 @@ import pytest
 from app import followup, outbound
 from app.config import settings
 from app.models import FollowUp, FollowUpEvent, Invoice, Status, VoiceCall, WhatsAppSession
-from tests.test_flow import client, h   # noqa: F401 (fixtures)
+from tests.test_flow import client, h  # noqa: F401 (fixtures)
 
 NOW = datetime(2026, 10, 28, 12, 0).astimezone()      # inside the sending hours (09:00-19:00)
 NUMBER = "+919876543210"
@@ -537,3 +538,104 @@ def test_followup_api_lists_and_stops(client, on, sent, session):
     assert client.post(f"/api/v1/followups/{item['id']}/stop", headers=h(on["ravi"])).status_code == 409
     assert client.post("/api/v1/followups/999/stop", headers=h(on["ravi"])).status_code == 404
     assert client.get("/api/v1/voice/calls").json() == []
+
+
+# ---------- WhatsApp STATUS / HELP, reasons for unusable files, numbers stored on users (D-106)
+
+def test_status_lists_the_senders_own_waiting_invoices(on, sent, session):
+    mine = make_invoice(session, on["priya"], reason="GSTIN of the supplier is invalid")
+    make_invoice(session, on["priya"], status=Status.PROCESSING)
+    make_invoice(session, on["ravi"], name="Someone Else's Supplier")
+    reply(on, "Status")
+    body = sent.messages[0]["body"]
+    assert "1 invoice is waiting for review" in body and f"#{mine.id} Sri Lakshmi Steels ₹6,136.00" in body
+    assert "GSTIN of the supplier is invalid" in body and "1 file is still being read" in body
+    assert "Someone Else" not in body
+    assert rows(session, FollowUpEvent)[-1].detail == "status"
+
+
+def test_status_with_nothing_waiting_and_help(on, sent, session):
+    reply(on, "status")
+    reply(on, "help")
+    assert sent.messages[0]["body"] == "Nothing is waiting for your review."
+    assert sent.messages[1]["body"] == followup.HELP_FULL and "STATUS" in followup.HELP_FULL
+
+
+def test_unusable_files_say_why_and_passing_failures_say_it_will_retry(on, sent):
+    followup.notify_unreadable(on["priya"].id, f"whatsapp:{NUMBER}", "it is larger than 20 MB")
+    followup.notify_retrying(on["priya"].id, f"whatsapp:{NUMBER}")
+    first, second = (m["body"] for m in sent.messages)
+    assert first.startswith("I couldn't use one of your attachments: it is larger than 20 MB.")
+    assert "try again in a few minutes" in second and "no need to send it again" in second
+
+
+def test_a_number_stored_on_the_user_is_reminded_without_whatsapp_senders(on, sent, monkeypatch, session):
+    monkeypatch.setattr(settings, "whatsapp_senders", "")
+    on["priya"].whatsapp_number = NUMBER
+    session.commit()
+    make_invoice(session, on["priya"], since=NOW - 90 * MIN)
+    open_window(session)
+    followup.run_once()
+    assert [m["number"] for m in sent.messages] == [NUMBER]
+
+
+# ---------- one-click choices in reminder emails (D-107)
+
+def emailed_links(on, sent, monkeypatch, session, invoices=1):
+    email_ladder(monkeypatch)
+    for _ in range(invoices):
+        make_invoice(session, on["priya"], since=NOW - 90 * MIN)
+    followup.run_once()
+    found = re.findall(r'href="https://example\.test/api/v1/followups/action\?t=([^"]+)"', sent.emails[-1]["html"])
+    return dict(zip(followup.EMAIL_ACTIONS, found, strict=True))     # in the order of EMAIL_ACTIONS
+
+
+def test_reminder_emails_carry_the_three_choices(on, sent, monkeypatch, session):
+    links = emailed_links(on, sent, monkeypatch, session, invoices=2)
+    html = sent.emails[0]["html"]
+    assert "I&#x27;m handling it" in html and "Remind me later" in html and "Stop these reminders" in html
+    user_id, ids, action = followup.read_action_token(links["later"])
+    assert (user_id, action, sorted(ids)) == (on["priya"].id, "later", [f.id for f in rows(session, FollowUp)])
+
+
+def test_opening_a_link_changes_nothing_pressing_confirm_does(client, on, sent, monkeypatch, session):
+    t = emailed_links(on, sent, monkeypatch, session)["handling"]
+    page = client.get(f"/api/v1/followups/action?t={t}")
+    assert page.status_code == 200 and "Pause the reminders about 1 invoice for 24 hours" in page.text
+    assert 'method="post"' in page.text and rows(session, FollowUp)[0].next_due_at != NOW + timedelta(hours=24)
+    done = client.post("/api/v1/followups/action", data={"t": t})
+    assert done.status_code == 200 and "won&#x27;t be reminded about 1 invoice for 24 hours" in done.text
+    fu = rows(session, FollowUp)[0]
+    assert fu.next_due_at == NOW + timedelta(hours=24) and fu.state == "active"
+    event = rows(session, FollowUpEvent)[-1]
+    assert (event.channel, event.direction, event.status, event.detail) == ("email", "in", "reply", "handling")
+
+
+def test_stop_by_link_and_a_second_press(client, on, sent, monkeypatch, session):
+    t = emailed_links(on, sent, monkeypatch, session)["stop"]
+    client.post("/api/v1/followups/action", data={"t": t})
+    assert (rows(session, FollowUp)[0].state, rows(session, FollowUp)[0].done_reason) == ("done", "stopped")
+    again = client.post("/api/v1/followups/action", data={"t": t})
+    assert again.status_code == 200 and "already ended" in again.text
+
+
+def test_links_that_are_changed_expired_or_for_someone_else_do_nothing(client, on, sent, monkeypatch, clock, session):
+    t = emailed_links(on, sent, monkeypatch, session)["stop"]
+    body, _, signature = t.partition(".")
+    forged = followup.action_token(on["ravi"].id, [rows(session, FollowUp)[0].id], "stop")   # Ravi's own link
+    for bad in (body + "." + "0" * 32, "garbage", "", forged):
+        r = client.post("/api/v1/followups/action", data={"t": bad})
+        assert r.status_code in (200, 400)
+    assert rows(session, FollowUp)[0].state == "active"           # Ravi's link can't touch Priya's reminders
+    clock.now = NOW + timedelta(days=followup.ACTION_LINK_DAYS, minutes=1)
+    expired = client.get(f"/api/v1/followups/action?t={t}")
+    assert expired.status_code == 410 and "expired" in expired.text
+    assert rows(session, FollowUp)[0].state == "active"
+
+
+def test_no_links_without_a_public_address(on, sent, monkeypatch, session):
+    monkeypatch.setattr(settings, "public_base_url", "")
+    email_ladder(monkeypatch)
+    make_invoice(session, on["priya"], since=NOW - 90 * MIN)
+    followup.run_once()
+    assert "followups/action" not in sent.emails[0]["html"] and "What to do:" in sent.emails[0]["html"]

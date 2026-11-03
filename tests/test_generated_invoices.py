@@ -18,7 +18,7 @@ from app.models import Status
 from app.schemas import ExtractedInvoice
 from scripts.make_test_invoices import SCENARIOS, make_set, render
 from tests.conftest import not_an_invoice
-from tests.test_flow import client, fake_extract, get, h, upload   # noqa: F401 (fixtures)
+from tests.test_flow import client, fake_extract, get, h, upload  # noqa: F401 (fixtures)
 
 KIND = {"TAX INVOICE": "tax_invoice", "CREDIT NOTE": "credit_note"}
 
@@ -43,6 +43,7 @@ def perfect_reader(registry: dict):
                    for line in inv["lines"]], hsn_summary=[],
             taxable_total=inv["taxable"], cgst=inv["cgst"], sgst=inv["sgst"], igst=inv["igst"],
             round_off=inv["round_off"], grand_total=inv["total"], amount_in_words=inv["words"],
+            supplier_bank_account=None, supplier_ifsc=None,
             confidence=0.97, low_confidence_fields=[])
     return read
 

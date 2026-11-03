@@ -414,3 +414,37 @@ text cells, line items, control characters and negative numbers.
 43. (2026-10-29) A reminder email ("2 invoices waiting for review: #4 ... Rs 1,180.00 ...") arrives in Priya's
     inbox, which the Gmail listener watches. Without the marker, what would the listener do with it, and what would
     the next reminder say? Why is the marker keyed with `COMPOSIO_API_KEY` instead of being a fixed text? [D-100]
+
+44. (2026-10-30) You add a `branch_id` column to `Invoice` in `app/models.py` and push without a migration. What
+    fails, where, and why would this have gone unnoticed before D-102? What does the API do on its next start once
+    you add the migration? [D-102, D-14]
+45. (2026-10-30) The API and a separate `python -m app.worker` start at the same moment against a database made by
+    `create_all`. What stops both from stamping and upgrading at once, and why is stamping (instead of running the
+    baseline) correct for that database? [D-102]
+46. (2026-10-30) `API_KEY` is set. Which of these get a 401: Twilio posting a WhatsApp message, a browser opening
+    `/docs`, Composio redirecting to the Gmail callback, `curl /readyz`, the demo frontend approving an invoice
+    through its proxy? Why is the key still "not a login"? [D-103]
+
+47. (2026-11-02) Sri Lakshmi Steels' recorded account ends 5678. An invoice arrives showing an account ending 7766.
+    Walk through what the reviewer sees, why `approve` refuses, and the two legitimate ways forward. Why does
+    approving the invoice itself never update the recorded account? [D-104]
+48. (2026-11-02) Why is "trust on first use" accepted for the first account, and what would an attacker have to do
+    to exploit it? What would remove that risk, and what would it cost the team? [D-104]
+49. (2026-11-02) A September invoice is approved on 3 October, after September's GSTR-2B was uploaded on 1 October.
+    The supplier files it late and it appears in October's GSTR-2B. What does September's reconciliation show on
+    2 October, 4 October and after October's upload? Why does none of that need September to be uploaded again?
+    [D-105]
+50. (2026-11-02) The supplier filed invoice SLS/26-27/121 with CGST and SGST of 400 each; ours says 468 each. Where
+    does the 136 appear, and why is "filed higher than ours" not added to ITC at risk? [D-105]
+51. (2026-11-02) Twilio times out waiting for our webhook and sends the same message with a PDF again. Walk through
+    both requests: what is written, what is downloaded, what the sender is told. Before D-106, what would have
+    happened, and why was the invoice still not doubled? [D-106]
+52. (2026-11-02) Why does opening a reminder email's "Stop these reminders" link not stop anything, and what would go
+    wrong at a company that uses Outlook Safe Links if it did? Why is that route open without the API key, and
+    what stops someone from stopping another person's reminders? [D-107]
+53. (2026-11-03) `SECOND_APPROVAL_ABOVE=500000`. Priya approves a ₹6 lakh invoice, Ravi corrects its PO number,
+    then Ravi approves. What is its status, and why? With `MAKER_CHECKER=true`, what changes? [D-108]
+54. (2026-11-03) A consultant (company PAN) bills ₹40,000 + GST in May and ₹20,000 + GST in August. What does the
+    `tds` check say on each, which one goes to review, and why must the May invoice be looked at again? [D-109]
+55. (2026-11-03) A micro supplier with agreed 60-day terms sends an invoice dated 1 October. When is it due, why
+    not 30 November, and what does it cost the company to pay on 30 November? [D-110]

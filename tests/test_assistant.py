@@ -8,12 +8,13 @@ import pytest
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
-from app import assistant, assistant_tools as T
+from app import assistant
+from app import assistant_tools as T
 from app.api import app
 from app.config import settings
 from app.excel import export_pending
 from app.models import EmailMessage, Invoice, Status
-from tests.conftest import make_extracted, OTHER_GSTIN, SUPPLIER_GSTIN
+from tests.conftest import OTHER_GSTIN, SUPPLIER_GSTIN, make_extracted
 
 
 def add(session, users, n, status, **kw):
@@ -90,7 +91,8 @@ def test_read_excel(data, session):
     session.commit()
     export_pending(session)
     r = j(T.read_excel())
-    assert r["matching_rows"] == 2 and r["totals"]["Grand Total"] == 12272 and r["download_url"] == "/api/v1/excel?year=2026-27" and r["year"] == "2026-27"
+    assert r["matching_rows"] == 2 and r["totals"]["Grand Total"] == 12272
+    assert r["download_url"] == "/api/v1/excel?year=2026-27" and r["year"] == "2026-27"
     assert j(T.read_excel(search="bangalore"))["matching_rows"] == 1
     assert j(T.read_excel(sheet="Line Items"))["matching_rows"] == 4
     assert "sheets" in j(T.read_excel(sheet="Nope"))
@@ -116,6 +118,7 @@ def test_export_files_and_download(data, users):
         assert client.get("/api/v1/assistant/files/..%2F..%2F.env").status_code == 404
         assert client.get("/api/v1/assistant/files/secret.xlsx").status_code == 404
     from pathlib import Path
+
     from app.config import settings
     wb = load_workbook(Path(settings.export_dir) / r["file_name"])
     assert wb.sheetnames == ["Invoices", "Line Items"] and wb["Invoices"].max_row == 4

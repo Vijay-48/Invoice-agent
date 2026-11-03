@@ -8,7 +8,7 @@ import logging
 import threading
 import time
 
-from app import worker, gmail_listener, reports, followup
+from app import followup, gmail_listener, reports, whatsapp, worker
 from app.config import settings
 
 log = logging.getLogger("background")
@@ -40,6 +40,9 @@ class Background:
             self._spawn("reports", reports.run)
         if settings.followup_enabled:
             self._spawn("followup", followup.run)
+        if settings.twilio_account_sid and settings.twilio_auth_token:
+            # WhatsApp attachments whose download failed for a passing reason are tried again
+            self._spawn("whatsapp-retry", whatsapp.run_retries)
 
     def _spawn(self, name: str, target) -> None:
         t = threading.Thread(target=target, args=(self.stop,), name=name, daemon=True)

@@ -9,7 +9,8 @@ import html
 import logging
 import threading
 from collections import defaultdict
-from datetime import datetime, time as dtime, timedelta
+from datetime import datetime, timedelta
+from datetime import time as dtime
 
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError

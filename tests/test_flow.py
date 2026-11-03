@@ -10,14 +10,14 @@ from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from sqlalchemy import update
 
-from app import worker, excel
+from app import excel, worker
 from app.api import app
 from app.config import settings
 from app.db import SessionLocal
 from app.ingest import ingest_document
 from app.models import Invoice, Status
 from app.pipeline import extract
-from tests.conftest import make_extracted, not_an_invoice, SUPPLIER_GSTIN
+from tests.conftest import SUPPLIER_GSTIN, make_extracted, not_an_invoice
 
 
 @pytest.fixture

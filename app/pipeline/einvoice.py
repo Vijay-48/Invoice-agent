@@ -21,7 +21,7 @@ import pymupdf
 from app.config import settings
 from app.documents import PDF_LOCK, render_dpi
 from app.logs import timed
-from app.pipeline.checks import Check, FAIL, PASS
+from app.pipeline.checks import FAIL, PASS, Check
 from app.schemas import ExtractedInvoice
 
 log = logging.getLogger("einvoice")

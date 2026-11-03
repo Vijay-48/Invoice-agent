@@ -6,7 +6,7 @@ from app.models import Invoice, Status
 from app.pipeline.validate import validate
 from app.pipeline.words import parse_amount
 from tests.conftest import make_extracted
-from tests.test_flow import client, fake_extract, get, run_worker, upload   # noqa: F401 (fixtures)
+from tests.test_flow import client, fake_extract, get, run_worker, upload  # noqa: F401 (fixtures)
 
 
 @pytest.mark.parametrize("text, amount", [
@@ -157,7 +157,9 @@ def test_invented_hsn_summary_is_dropped(tmp_path, monkeypatch):
     """Real gpt-4o-mini behaviour (2026-10-26): asked to copy the table, it built one from the lines on
     invoices that print none, so the check would only compare the AI with itself."""
     from types import SimpleNamespace
+
     import pymupdf
+
     from app.pipeline import extract
     pdf = tmp_path / "a.pdf"
     doc = pymupdf.open()

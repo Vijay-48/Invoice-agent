@@ -6,13 +6,13 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import payables
 from app.models import AuditLog, Invoice, Status, audit
-from app.pipeline import einvoice, journal, supplier
-from app.pipeline.checks import Check, WARN
-from app.pipeline.decide import decide, RULES_VERSION
-from app.pipeline.validate import validate, normalize_extracted, normalize_invoice_no, parse_date
+from app.pipeline import einvoice, journal, supplier, tax
+from app.pipeline.checks import WARN, Check
+from app.pipeline.decide import RULES_VERSION, decide
+from app.pipeline.validate import normalize_extracted, normalize_invoice_no, parse_date, validate
 from app.schemas import ExtractedInvoice
-
 
 log = logging.getLogger("decide")
 
@@ -41,6 +41,7 @@ def evaluate(session: Session, inv: Invoice, data: ExtractedInvoice, *, actor: s
     if after_correction and extra_checks is None:
         extra_checks = _carried_checks(session, inv, data)
     data = store(inv, data)
+    inv.tds_section = inv.tds_base = inv.tds_rate = inv.tds_amount = None
     session.flush()
     if data.document_type == journal.JOURNAL:
         status, reason = _evaluate_journal(session, inv, data, extra_checks or [])
@@ -49,7 +50,8 @@ def evaluate(session: Session, inv: Invoice, data: ExtractedInvoice, *, actor: s
         result = validate(session, inv, data) if checked else None
         if result is not None:
             result.checks += (journal.check_invoice_against_journals(session, inv, data)
-                              + supplier.check_supplier(session, inv, data) + (extra_checks or []))
+                              + supplier.check_supplier(session, inv, data) + supplier.check_bank(session, data)
+                              + tax.check_tax(session, inv, data) + (extra_checks or []))
             status, reason = decide(data, result)
             inv.checks = [c.dict() for c in result.checks]
             inv.duplicate_of_id = result.duplicate_of
@@ -67,10 +69,13 @@ def evaluate(session: Session, inv: Invoice, data: ExtractedInvoice, *, actor: s
 
     inv.status = status
     inv.status_reason = reason
+    inv.due_date = payables.due_date_for(session, inv, data.document_type)
     if status == Status.APPROVED:
         inv.approved_by = "auto"
         inv.approved_at = datetime.now(timezone.utc)
-    audit(session, inv.id, "decide", f"{status}: {reason}", {"rules_version": RULES_VERSION}, actor=actor)
+        supplier.record_approved(session, inv, data, "auto")
+    audit(session, inv.id, "decide", f"{status}: {reason}", {"rules_version": RULES_VERSION, "tax_rules_version": tax.RULES_VERSION},
+          actor=actor)
     log.info("Invoice %s -> %s (%s)", inv.id, status, reason)
     return status
 

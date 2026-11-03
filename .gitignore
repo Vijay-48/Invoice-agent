@@ -5,3 +5,9 @@ __pycache__/
 golden/docs/
 golden/expected/
 reports/
+*.exe
+.ruff_cache/
+.pytest_cache/
+
+# editor settings with this machine's Python path
+.vscode/

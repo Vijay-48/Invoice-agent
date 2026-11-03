@@ -261,7 +261,7 @@ def read_excel(sheet: str = "Invoices", search: str = "", limit: int = 30, year:
         return v
     return _json({"year": shown_year, "other_years": [y for y in years if y != shown_year], "sheet": sheet,
                   "headers": headers, "matching_rows": len(data), "totals": totals,
-                  "rows": [dict(zip(headers, map(cell, r))) for r in data[:min(max(limit, 1), MAX_ROWS)]],
+                  "rows": [dict(zip(headers, map(cell, r), strict=False)) for r in data[:min(max(limit, 1), MAX_ROWS)]],
                   "download_url": f"{API}/excel" + (f"?year={shown_year}" if shown_year else ""),
                   "file_name": path.name})
 
@@ -363,9 +363,9 @@ def export_invoices(text: str = "", status: str = "", supplier: str = "", docume
                       d.get("buyer_gstin"), inv.invoice_no, inv.invoice_date, _num(d.get("taxable_total")),
                       _num(d.get("cgst")), _num(d.get("sgst")), _num(d.get("igst")), _num(d.get("round_off")),
                       _num(d.get("grand_total")), d.get("currency") or "INR", inv.source, inv.original_filename])
-        for n, l in enumerate(d.get("lines") or [], start=1):
-            lines.append([inv.id, inv.invoice_no, n, l.get("description"), l.get("hsn_sac"), _num(l.get("quantity")),
-                          _num(l.get("unit_price")), _num(l.get("taxable_value")), _num(l.get("gst_rate"))])
+        for n, ln in enumerate(d.get("lines") or [], start=1):
+            lines.append([inv.id, inv.invoice_no, n, ln.get("description"), ln.get("hsn_sac"), _num(ln.get("quantity")),
+                          _num(ln.get("unit_price")), _num(ln.get("taxable_value")), _num(ln.get("gst_rate"))])
     folder = Path(settings.export_dir)
     folder.mkdir(parents=True, exist_ok=True)
     name = f"export-{date.today():%Y%m%d}-{uuid.uuid4().hex[:8]}.{fmt}"

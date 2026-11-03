@@ -32,6 +32,9 @@ os.environ.update({
     "FOLLOWUP_HOURS": "09:00-19:00",
     "FOLLOWUP_MAX_CALLS_PER_DAY": "2",
     "FOLLOWUP_EMAIL_TO": "",
+    # The schema is made by create_all below (tests/test_migrations.py tests the migrations); no API key
+    "MIGRATE_ON_START": "false",
+    "API_KEY": "",
     "FOLLOWUP_EMAIL_SENDER_USER_ID": "0",
     "TWILIO_WHATSAPP_FROM": "",
     "TWILIO_WHATSAPP_TEMPLATE_SID": "",
@@ -112,6 +115,7 @@ def make_extracted(**overrides) -> ExtractedInvoice:
         reference_invoice_number=None, currency="INR", place_of_supply_state_code="36", po_number="PO-2026-0042", irn=None,
         lines=lines, hsn_summary=[], taxable_total=taxable, cgst=tax / 2, sgst=tax / 2, igst=0, round_off=0,
         grand_total=taxable + tax, amount_in_words=None, confidence=0.95, low_confidence_fields=[],
+        supplier_bank_account=None, supplier_ifsc=None,
     )
     base.update(overrides)
     return ExtractedInvoice(**base)
@@ -123,4 +127,5 @@ def not_an_invoice() -> ExtractedInvoice:
         invoice_number="", invoice_date="", voucher_number=None, voucher_date=None, invoice_kind="regular",
         reference_invoice_number=None, currency="INR", place_of_supply_state_code=None, po_number=None, irn=None,
         lines=[], hsn_summary=[], taxable_total=0, cgst=0, sgst=0, igst=0, round_off=0, grand_total=0, amount_in_words=None,
+        supplier_bank_account=None, supplier_ifsc=None,
         confidence=0.9, low_confidence_fields=[])

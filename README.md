@@ -47,14 +47,20 @@ failed check points at (hover for the reason).
 
 ## Setup (Windows, no Docker)
 
-Needs Python 3.11+ and a local PostgreSQL.
+Needs Python 3.12+ and a local PostgreSQL.
 
-    pip install -r requirements.txt pytest
+    pip install -r requirements-dev.txt
     python -m scripts.setup_db
 
 `setup_db` asks for your `postgres` superuser password, then creates the `ap` user
 (password `ap`), the `ap` and `ap_test` databases, `.env` and the tables. Safe to run
-again. If it reports tables from the previous version, run it with `--reset`.
+again. Dependencies are pinned (`requirements.txt`); `requirements-dev.txt` adds pytest and ruff.
+
+The tables come from the migrations in `migrations/` (Alembic), applied on every start
+(`MIGRATE_ON_START=true`). After changing `app/models.py`:
+
+    alembic revision --autogenerate -m "what changed"     # then read the generated file
+    alembic upgrade head                                   # or just restart the API
 
 In `.env` set `OPENAI_API_KEY`, `COMPOSIO_API_KEY` (dashboard.composio.dev → Platform)
 and `COMPANY_GSTIN`.
@@ -169,8 +175,21 @@ Invoices sent on WhatsApp to your Twilio number are processed like uploads.
 Each PDF, image, Excel, CSV or Word attachment (up to 10 per message, `MAX_UPLOAD_MB` each) becomes
 its own invoice with source `whatsapp`; the same file sent again keeps one record. Every request's
 Twilio signature is checked; media is downloaded only from Twilio, for your account. Nothing is sent
-back to the sender unless follow-ups are on (next section). Text-only messages, .zip files and unsupported
-types are only logged (number masked, text never logged).
+back to the sender unless follow-ups are on (next section). .zip files and unsupported types are not used
+(number masked in logs, message text never stored).
+
+**Who may send.** Store a person's number on their user, which works at once:
+
+    curl -X PUT localhost:8000/api/v1/users/1/whatsapp -H "Content-Type: application/json" -d "{\"number\": \"+919876543210\"}"
+
+`WHATSAPP_SENDERS` in `.env` still works (needs a restart). Messages from anyone else are logged and ignored.
+
+**What came in.** `GET /api/v1/whatsapp/messages` lists every message (sender masked) and what became of each
+attachment: `ingested` (with the invoice id), `duplicate`, `rejected` (and why), `failed` (tried again by itself
+after 2, 10 and 30 minutes) or `gave_up`. `POST /api/v1/whatsapp/media/{id}/retry` tries one again. Twilio
+sending the same message twice is handled once.
+
+**Commands** (when follow-ups are on): `STATUS` lists your invoices waiting for review; `HELP` lists the commands.
 
 ## Follow-up WhatsApp messages, emails and calls
 
@@ -181,8 +200,11 @@ WhatsApp sender what became of their file. One message lists all of a person's i
 
 **Email, no Twilio needed.** A step can be `email@minutes`, e.g. `FOLLOWUP_REVIEW_LADDER=email@240,email@1440`.
 The email goes from a connected Gmail (`FOLLOWUP_EMAIL_SENDER_USER_ID`, 0 = the report's sender) to the invoice
-owner's address, only if that address is listed in `FOLLOWUP_EMAIL_TO`. Emails take no replies: the reminders
-stop by themselves once the invoice is dealt with. A step on a channel the person has no address for is skipped.
+owner's address, only if that address is listed in `FOLLOWUP_EMAIL_TO`. A step on a channel the person has no
+address for is skipped. Each email has three buttons: **I'm handling it**, **Remind me later**, **Stop these
+reminders**. They need `PUBLIC_BASE_URL` to be an address the person's browser can reach (ngrok in development),
+and are signed with `ACTION_LINK_SECRET` (else `COMPOSIO_API_KEY`). Opening a link shows a Confirm button; only
+pressing it changes the reminders, so mail scanners that open links don't. They never approve anything.
 
 **Try it safely first.** `FOLLOWUP_DRY_RUN=true` (the default) sends nothing; each step is only recorded:
 `GET /api/v1/followups` (the ladders) and `GET /api/v1/followups/events` (what would have been sent).
@@ -270,6 +292,8 @@ One workbook per financial year (April–March, by invoice date): `output/invoic
   CGST/SGST/IGST, round off, total, approved by (`auto` or the user), source, sender, user, file.
 - **Line Items**: one row per item, linked by Invoice ID.
 
+The Invoices sheet ends with Due Date, TDS Section, TDS and Net Payable (total less TDS).
+
 If the file is open in Excel when an invoice is approved, it can't be saved: the
 invoice stays `APPROVED` and is written as soon as the file is closed (the worker
 retries every few seconds). Only that year's invoices wait; other years are written. Rows are never written twice.
@@ -300,6 +324,73 @@ changes, 30 people at once already caused failed requests (database connections 
 
 Run only one API process (no `--workers N`): the Gmail listener and the report schedule must run once.
 Add worker processes instead if documents queue up.
+
+## Suppliers and bank details
+
+Every approved invoice's supplier (by GSTIN) is kept in the supplier master (`GET /api/v1/suppliers`,
+`GET /api/v1/suppliers/{gstin}`), with its PAN and the bank account payments go to. The account is read from the
+invoices: the first approved invoice that shows one sets it. When a later invoice shows a **different account**,
+it goes to review and **can't be approved** until either the reviewer corrects a misreading, or someone confirms
+the new account with the supplier on a phone number already on file and records it:
+
+    curl -X POST localhost:8000/api/v1/suppliers/36AAACS1234A1Z3/bank -H "X-User-Id: 1" -H "Content-Type: application/json" -d "{\"bank_account\": \"918020099887766\", \"bank_ifsc\": \"UTIB0000456\", \"invoice_id\": 12, \"note\": \"Called Ramesh on the number in our vendor file\"}"
+
+Every change is kept in the supplier's history (`events`).
+
+## GSTR-2B reconciliation
+
+Each month, download GSTR-2B from the GST portal (Returns > GSTR-2B > Download, **JSON**) and upload it:
+
+    curl -X POST localhost:8000/api/v1/gstr2b -H "X-User-Id: 1" -F "file=@returns_R2B_19AABCT1332L2ZA_102026.json"
+
+The answer (and `GET /api/v1/gstr2b/{id}`) lists every document the suppliers filed, matched with the approved
+invoices, plus the approved invoices of that month **missing from GSTR-2B**, and the **ITC at risk**: tax on
+invoices missing from 2B, tax filed lower than on the invoice, and credit the portal marks as not available.
+`GET /api/v1/gstr2b/{id}/excel` gives the same as a workbook for the accountant. Matches are worked out each time
+you look, so invoices approved later and suppliers filing late are picked up without uploading again.
+
+## Approvals, tax and payables
+
+**Approval matrix.** Give each person a limit (empty = any amount, 0 = can't approve):
+
+    curl -X PUT localhost:8000/api/v1/users/2/approval-limit -H "X-User-Id: 1" -H "Content-Type: application/json" -d "{\"limit\": 200000}"
+
+`SECOND_APPROVAL_ABOVE=500000` makes larger invoices need two different approvers (the first approval shows as
+"1 of 2"). `MAKER_CHECKER=true` stops the person who uploaded, sent or corrected an invoice from approving it.
+
+**Tax.** Each invoice gets a `tds` check from its SAC codes (194C / 194J / 194I / 194H, rate by the supplier's PAN,
+year thresholds), and warnings for **reverse charge** (GTA, advocates, security, residential rent with no GST
+charged) and **blocked input tax credit** (cars, food, health and beauty, construction). The rules are in
+`app/pipeline/tax.py` for your CA to confirm; `TDS_CHECKS=false` turns TDS off.
+
+**Payables.** Due date = invoice date + the supplier's terms (default `PAYMENT_DAYS=30`). Set terms and MSME status:
+
+    curl -X PUT localhost:8000/api/v1/suppliers/36AAACS1234A1Z3/terms -H "X-User-Id: 1" -H "Content-Type: application/json" -d "{\"payment_terms_days\": 45, \"msme_category\": \"micro\", \"udyam_number\": \"UDYAM-TS-02-0012345\"}"
+
+Micro and small suppliers are due within 45 days at most (15 with no agreed terms). After paying in the bank:
+
+    curl -X POST localhost:8000/api/v1/invoices/12/payment -H "X-User-Id: 1" -H "Content-Type: application/json" -d "{\"paid_on\": \"2026-11-03\", \"reference\": \"UTR123456\"}"
+
+`GET /api/v1/payables/ageing` shows what is owed per supplier by days overdue (net of TDS) and MSME invoices past
+due; `GET /api/v1/payables/due?days=7` is the list for the next payment run.
+
+## Production checklist
+
+- **`API_KEY`**: set a long random value (`python -c "import secrets; print(secrets.token_urlsafe(32))"`).
+  Every request must then send `X-API-Key: <key>` (or `Authorization: Bearer <key>`); the demo frontend's
+  proxy must add it. Without it, anyone who can reach the server can act as any user. Twilio and Composio
+  webhooks, the Gmail consent callback and the health checks don't need it (they have their own proof).
+  `X-User-Id` still names the acting user: this is a shared key, not a login.
+- **HTTPS** in front (a reverse proxy, or a tunnel such as ngrok in development), with `PUBLIC_BASE_URL`
+  set to exactly that address: Twilio signatures and the Gmail callback depend on it.
+- **One API process** (see above), started without `--reload`:
+  `uvicorn app.api:app --host 0.0.0.0 --port 8000 --proxy-headers`.
+- **Health checks**: `GET /healthz` (process up) and `GET /readyz` (database answers; 503 if not).
+- **Migrations** run on start. To run them as a separate deploy step instead, set `MIGRATE_ON_START=false`
+  and run `python -m app.migrate` before starting.
+- **Secrets** only in `.env` / the environment, never in git. Rotate any key that was ever pasted elsewhere.
+- **Backups** of the `ap` database and of `STORAGE_DIR` (the original files) and the Excel folder.
+- **Follow-ups**: start with `FOLLOWUP_DRY_RUN=true`, check `/api/v1/followups/events`, then go live.
 
 ## Logs
 
@@ -365,20 +456,32 @@ read automatically.
 
     pytest
 
-Uses the `ap_test` database (emptied on every run, never point it at `ap`). OpenAI and
-Composio are faked, so no keys are used. Other database:
+Uses the `ap_test` database (emptied on every run, never point it at `ap`). OpenAI,
+Composio and Twilio are faked, so no keys are used. Other database:
 `set TEST_DATABASE_URL=postgresql+psycopg://...` (cmd) or `$env:TEST_DATABASE_URL = "..."` (PowerShell).
+
+    ruff check app tests scripts migrations      # lint (settings in pyproject.toml)
+
+GitHub Actions (`.github/workflows/ci.yml`) runs both on every push to `main` and every pull request,
+against a fresh PostgreSQL 17.
 
 ## Layout
 
-    app/api.py               REST API (/api/v1)
+    app/api.py               REST API (/api/v1), /healthz, /readyz
+    app/security.py          API key check (API_KEY)
+    app/gstr2b.py            GSTR-2B upload and reconciliation with approved invoices
+    app/payables.py          due dates (supplier terms, MSME), payments marked, AP ageing
+    app/migrate.py           applies the database migrations on start
+    migrations/              Alembic migrations (0001 = baseline of every table)
     app/ingest.py            one entry point for every channel (hash, store, queue)
     app/gmail.py             Composio: connect, trigger, read emails, download attachments
     app/gmail_listener.py    receives Composio events (websocket, or webhook in production)
     app/gmail_health.py      expired/revoked Gmail access: check, show, alert
-    app/whatsapp.py          WhatsApp via Twilio: signed webhook, sender mapping, media download -> ingest
-    app/followup.py          reminder ladders (WhatsApp, then a call), replies 1 / 2 / STOP, dry run
-    app/outbound.py          Twilio REST: send a WhatsApp message, place a call
+    app/whatsapp.py          WhatsApp via Twilio: signed webhook, sender mapping, message log, media download
+                             -> ingest, retries of failed downloads
+    app/followup.py          reminder ladders (WhatsApp, email, call), replies 1 / 2 / STOP / STATUS / HELP,
+                             one-click email choices, dry run
+    app/outbound.py          send: WhatsApp message and call (Twilio), reminder email (Gmail)
     app/voice.py             the follow-up call: ConversationRelay webhook + WebSocket, five outcomes
     app/background.py        starts/stops the worker and Gmail listener with the API
     app/worker.py            Postgres queue (SKIP LOCKED) + Excel retries
@@ -389,10 +492,11 @@ Composio are faked, so no keys are used. Other database:
     app/pipeline/learning.py reviewers' past corrections per supplier, as hints for the AI
     app/pipeline/validate.py GSTIN checksum, GST type, arithmetic, dates, duplicates
     app/pipeline/decide.py   auto-approve / review / duplicate / not an invoice
+    app/pipeline/supplier.py supplier history and master: bank details check, hold and confirmation
+    app/pipeline/tax.py      TDS section and amount, reverse charge, blocked input tax credit (rule tables)
     app/pipeline/evaluate.py stores values, runs checks, sets status (AI and corrections)
     app/excel.py             workbook writer
     app/assistant.py         AI chat (Agno tools in app/assistant_tools.py), streamed answers
     app/chat_store.py        saved chats (chat_sessions / chat_messages)
     app/reports.py           summary report by email + its schedule
-    legacy_v1/               previous version (PO matching, Markdown ledgers); safe to delete
-"# Invoice-agent" 
+    docs/planning/           planning notes and diagrams for the multi-branch platform
