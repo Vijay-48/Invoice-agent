@@ -19,6 +19,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+
+# SAMPLE_PDF and FakeAgent: copied from the source project's tests/test_extract_preview.py
+# (that module tests app/extract_preview.py, which this project doesn't have)
+import pymupdf
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -31,10 +35,6 @@ from app.ingest import ingest_document
 from app.models import AuditLog, Invoice, Status
 from app.pipeline import extract
 from tests.conftest import make_extracted
-
-# SAMPLE_PDF and FakeAgent: copied from the source project's tests/test_extract_preview.py
-# (that module tests app/extract_preview.py, which this project doesn't have)
-import pymupdf
 
 SAMPLE_TEXT = """TAX INVOICE
 Sri Lakshmi Steels Pvt Ltd   GSTIN 36AAACS1234A1Z3
@@ -121,6 +121,29 @@ def _fake_twilio(monkeypatch):
     monkeypatch.setattr(settings, "public_base_url", BASE_URL + "/")   # trailing slash is tolerated
     monkeypatch.setattr(settings, "whatsapp_senders", "")    # the real WHATSAPP_SENDERS is never used
     monkeypatch.setattr(settings, "twilio_account_sid", ACCOUNT_SID)
+
+
+@pytest.fixture(autouse=True)
+def fake_log(monkeypatch):
+    """The message log and the senders stored on users, in memory (tests/test_whatsapp_log.py runs the real
+    ones against the database). Records each logged message and each saved attachment result."""
+    state = SimpleNamespace(messages={}, results=[], stored={})
+
+    def record_message(message_sid, sender, user_id, kind, text_length, media, media_count):
+        if message_sid in state.messages:
+            return None
+        state.messages[message_sid] = dict(sender=sender, user_id=user_id, kind=kind, text_length=text_length,
+                                           media=list(media), media_count=media_count)
+        return len(state.messages)
+
+    def save_media_result(message_sid, position, outcome, attempt):
+        state.results.append((message_sid, position, outcome.status, attempt))
+        return outcome.status
+
+    monkeypatch.setattr(whatsapp, "record_message", record_message)
+    monkeypatch.setattr(whatsapp, "save_media_result", save_media_result)
+    monkeypatch.setattr(whatsapp, "stored_sender", lambda number: state.stored.get(number))
+    return state
 
 
 @pytest.fixture(autouse=True)
@@ -659,14 +682,26 @@ def test_never_ingested_when_attachment_fails(client, known_sender, twilio_http,
     assert fake_ingest.calls == []
 
 
-def test_twilio_retry_is_the_same_file(client, caplog, known_sender, twilio_http, fake_ingest):
-    """Twilio sending the same message twice: ingest_document()'s file hash keeps one invoice."""
+def test_twilio_retry_is_handled_once(client, caplog, known_sender, twilio_http, fake_ingest, fake_log):
+    """Twilio sending the same message twice: the second is recognised by its MessageSid and not downloaded."""
     caplog.set_level(logging.INFO, logger="whatsapp")
     post(client, media_message())
-    post(client, media_message())
-    assert len(fake_ingest.calls) == 2 and len(fake_ingest.by_hash) == 1
+    assert_empty_twiml(post(client, media_message()))
+    assert len(fake_ingest.calls) == 1 and len(twilio_http["requests"]) == 2     # media URL + its redirect, once
     assert "media 0 -> invoice 101, queued for processing" in caplog.text
-    assert "media 0 is the same file as invoice 101; not queued again" in caplog.text
+    assert "was already received (Twilio sent it again)" in caplog.text
+    assert fake_log.results == [(MESSAGE_SID, 0, "ingested", 1)]
+
+
+def test_the_same_file_in_another_message_is_one_invoice(client, caplog, known_sender, twilio_http, fake_ingest):
+    """A file sent again in a new message: ingest_document()'s file hash keeps one invoice."""
+    caplog.set_level(logging.INFO, logger="whatsapp")
+    post(client, media_message())
+    other_url = MEDIA_URL.replace("b" * 32, "d" * 32)
+    twilio_http["responses"][other_url] = lambda: httpx.Response(307, headers={"Location": CDN_URL})
+    post(client, media_message(MessageSid="MM" + "d" * 32, MediaUrl0=other_url))
+    assert len(fake_ingest.calls) == 2 and len(fake_ingest.by_hash) == 1
+    assert "is the same file as invoice 101; not queued again" in caplog.text
 
 
 def test_same_file_twice_in_one_message(client, caplog, known_sender, twilio_http, fake_ingest):

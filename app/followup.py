@@ -11,12 +11,13 @@ The ladders are FOLLOWUP_REVIEW_LADDER / FOLLOWUP_EXPORT_LADDER ("channel@minute
 Rules that keep it from becoming noise or a risk:
   - Off unless FOLLOWUP_ENABLED=true, and with FOLLOWUP_DRY_RUN=true (the default) nothing is sent:
     each step is only recorded in follow_up_events, so the whole ladder can be watched first.
-  - Only numbers listed in WHATSAPP_SENDERS and addresses in FOLLOWUP_EMAIL_TO are contacted (a step
+  - Only numbers stored on a user or listed in WHATSAPP_SENDERS and addresses in FOLLOWUP_EMAIL_TO are contacted (a step
     for a channel the person can't be reached on is skipped), only within FOLLOWUP_HOURS, with a daily
     cap per person. A person gets one message (or call) listing their invoices, not one per invoice.
   - A reply or a call can only pause reminders (1 = I'm handling it, 2 = remind me later, stop).
     It never approves, rejects or changes an invoice: that stays in the app, with a verified user.
-    Emails take no replies: they stop by themselves once the invoice is dealt with.
+    Emails carry the same three choices as signed one-click links (EMAIL_ACTIONS, D-107).
+  - On WhatsApp, STATUS lists the sender's invoices that wait for them and HELP lists the commands.
   - The ladder stops by itself the moment the invoice leaves the waiting state.
   - WhatsApp allows free-form messages only for 24 hours after the person last wrote to us; after
     that the approved template (TWILIO_WHATSAPP_TEMPLATE_SID) is used, or the step is skipped and
@@ -25,12 +26,16 @@ Rules that keep it from becoming noise or a risk:
 Several processes may run this: due rows are claimed with SKIP LOCKED and a lease, and Twilio is
 never called while a database transaction holds rows.
 """
+import base64
 import functools
+import hashlib
+import hmac
 import html
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, time as dtime, timedelta
+from datetime import datetime, timedelta
+from datetime import time as dtime
 
 from sqlalchemy import exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -69,7 +74,17 @@ NO_ADDRESS = {"whatsapp": "no number in WHATSAPP_SENDERS", "voice": "no number i
               "email": "email address not in FOLLOWUP_EMAIL_TO"}
 PAUSING_OUTCOMES = ("handling", "remind_later")
 HELP_WITH_WAITING = "Reply 1 if you are handling it, 2 to be reminded later, or STOP to end these reminders."
-HELP_NOTHING = "Send me an invoice as a PDF or a photo and I will process it."
+HELP_NOTHING = "Send me an invoice as a PDF or a photo and I will process it. Send STATUS to see your invoices."
+HELP_FULL = ("Send me an invoice as a PDF or a photo (several in one message is fine) and I will process it.\n"
+             "STATUS: your invoices waiting for review, and files being read\n"
+             "After a reminder: 1 = I'm handling it, 2 = remind me later, STOP = no more reminders about them\n"
+             "Approving and rejecting happen in the invoice app.")
+STATUS_WORDS = {"status", "pending", "list"}
+HELP_WORDS = {"help", "menu", "?"}
+READING = (Status.RECEIVED, Status.PROCESSING)
+# One-click choices in reminder emails: the same as WhatsApp's 1 / 2 / STOP (D-107)
+EMAIL_ACTIONS = {"handling": "I'm handling it", "later": "Remind me later", "stop": "Stop these reminders"}
+ACTION_LINK_DAYS = 7
 
 
 def _now() -> datetime:
@@ -106,7 +121,12 @@ def _senders(raw: str) -> dict[str, int | None]:
 
 
 def number_for(user_id: int) -> str | None:
-    """The WhatsApp/phone number of a user: only numbers in WHATSAPP_SENDERS are ever contacted."""
+    """The WhatsApp/phone number of a user: users.whatsapp_number, else WHATSAPP_SENDERS. No other
+    number is ever contacted."""
+    with SessionLocal() as session:
+        stored = session.scalar(select(User.whatsapp_number).where(User.id == user_id))
+    if stored:
+        return stored
     for number, uid in _senders(settings.whatsapp_senders).items():
         if uid == user_id:
             return number
@@ -134,6 +154,7 @@ def reachable_user_ids(session: Session, channels=CHANNELS) -> set[int]:
     ids = set()
     if {"whatsapp", "voice"} & set(channels):
         ids |= {uid for uid in _senders(settings.whatsapp_senders).values() if uid}
+        ids |= set(session.scalars(select(User.id).where(User.whatsapp_number.is_not(None))))
     emails = _emails(settings.followup_email_to)
     if "email" in channels and emails:
         ids |= set(session.scalars(select(User.id).where(func.lower(User.email).in_(emails))))
@@ -317,9 +338,10 @@ def compose(items: list[tuple[FollowUp, Invoice]]) -> str:
     return "\n\n".join(parts)
 
 
-def compose_email(name: str, items: list[tuple[FollowUp, Invoice]]) -> tuple[str, str]:
+def compose_email(name: str, items: list[tuple[FollowUp, Invoice]], user_id: int | None = None) -> tuple[str, str]:
     """The same reminder as an email: (subject, HTML). It ends with outbound.email_marker(), so the
-    Gmail listener never reads our own reminder as an invoice (it lists amounts and the word invoice)."""
+    Gmail listener never reads our own reminder as an invoice (it lists amounts and the word invoice).
+    With `user_id`, and when links can be made (action_links), it has the three one-click choices."""
     counts = {kind: sum(1 for fu, _ in items if fu.kind == kind) for kind in ("review", "export")}
     about = [text for n, text in ((counts["review"], f"{counts['review']} waiting for review"),
                                   (counts["export"], f"{counts['export']} approved but not in Excel")) if n]
@@ -342,6 +364,16 @@ def compose_email(name: str, items: list[tuple[FollowUp, Invoice]]) -> tuple[str
     if counts["export"]:
         todo.append("close the Excel invoice workbook if it is open, so the approved invoices can be written to it")
     body.append(f"<p><b>What to do:</b> {'; '.join(todo)}. Nothing needs to be sent back to this email.</p>")
+    links = action_links(user_id, [fu.id for fu, _ in items]) if user_id else None
+    if links:
+        buttons = " ".join(
+            f'<a href="{html.escape(url)}" style="display:inline-block;margin:4px 6px 4px 0;padding:8px 14px;'
+            f'border-radius:6px;background:{"#1a73e8" if action == "handling" else "#5f6368"};color:#fff;'
+            f'text-decoration:none">{html.escape(EMAIL_ACTIONS[action])}</a>' for action, url in links.items())
+        body.append("<p><b>Already on it, or need more time?</b> Tell the app with one click. It only changes these "
+                    f"reminders (\"I'm handling it\" pauses them for {settings.followup_ack_hours:g} hours, \"Remind me "
+                    f"later\" for {settings.followup_snooze_hours:g}); approving still happens in the app.</p>"
+                    f"<p>{buttons}</p>")
     body.append("<p>Why you got this: you get at most "
                 f"{settings.followup_max_per_day} reminder emails a day, only during working hours, and they stop by "
                 "themselves once each invoice is dealt with. If these invoices are not yours, tell the accounts team "
@@ -428,7 +460,7 @@ def prepare(session: Session, ids: list[int], now: datetime) -> list[Group]:
             if _count_today(session, user_id, now, "email") >= settings.followup_max_per_day:
                 group.skip = "limit"
             else:
-                group.subject, group.text = compose_email(session.get(User, user_id).name, items)
+                group.subject, group.text = compose_email(session.get(User, user_id).name, items, user_id)
                 group.sender = sender = sender or _email_sender(session)
         elif channel == "whatsapp":
             group.text = compose(items)
@@ -443,7 +475,7 @@ def prepare(session: Session, ids: list[int], now: datetime) -> list[Group]:
             if _count_today(session, user_id, now, "voice") >= settings.followup_max_calls_per_day:
                 group.skip = "limit"
             else:
-                from app import voice      # here, not at the top: voice imports this module
+                from app import voice  # here, not at the top: voice imports this module
                 call = VoiceCall(user_id=user_id, follow_up_ids=group.fu_ids, status="placing")
                 session.add(call)
                 session.flush()
@@ -548,9 +580,11 @@ def run(stop: threading.Event) -> None:
     """Background loop (started with the API when FOLLOWUP_ENABLED=true)."""
     log.info("Follow-ups: %s; review ladder %s; hours %s", "DRY RUN (nothing is sent)" if settings.followup_dry_run
              else "LIVE", settings.followup_review_ladder, settings.followup_hours)
-    if not (settings.whatsapp_senders.strip() or settings.followup_email_to.strip()):
-        log.warning("Follow-ups are on but WHATSAPP_SENDERS and FOLLOWUP_EMAIL_TO list no one: "
-                    "nobody can be contacted")
+    with SessionLocal() as session:
+        stored = session.scalar(select(func.count()).select_from(User).where(User.whatsapp_number.is_not(None)))
+    if not (stored or settings.whatsapp_senders.strip() or settings.followup_email_to.strip()):
+        log.warning("Follow-ups are on but no user has a WhatsApp number and WHATSAPP_SENDERS and "
+                    "FOLLOWUP_EMAIL_TO list no one: nobody can be contacted")
     while not stop.is_set():
         try:
             run_once()
@@ -576,6 +610,10 @@ def _pause(fu: FollowUp, now: datetime, hours: float) -> None:
 def _handle_text(session: Session, user_id: int, number: str, text: str, has_media: bool,
                  now: datetime) -> str | None:
     """What to answer to a WhatsApp text from a known sender (changes only reminder timing)."""
+    if text in STATUS_WORDS:
+        return status_text(session, user_id)
+    if text in HELP_WORDS:
+        return HELP_FULL
     command = COMMANDS.get(text)
     waiting = _awaiting(session, user_id, now)
     if command:
@@ -606,6 +644,31 @@ def _handle_text(session: Session, user_id: int, number: str, text: str, has_med
     return HELP_WITH_WAITING if waiting else HELP_NOTHING
 
 
+def status_text(session: Session, user_id: int) -> str:
+    """Answer to STATUS: the sender's invoices waiting for review (oldest first) and files still being read.
+    Read-only, and only about this sender's own invoices."""
+    waiting = list(session.scalars(select(Invoice).where(Invoice.user_id == user_id, Invoice.status.in_(WAITING))
+                                   .order_by(Invoice.updated_at).limit(LINES_PER_SECTION + 1)))
+    n_waiting = session.scalar(select(func.count()).select_from(Invoice)
+                               .where(Invoice.user_id == user_id, Invoice.status.in_(WAITING)))
+    n_reading = session.scalar(select(func.count()).select_from(Invoice)
+                               .where(Invoice.user_id == user_id, Invoice.status.in_(READING)))
+    parts = []
+    if n_waiting:
+        lines = [f"#{inv.id} {_name(inv)} {_amount(inv)}: {_short(inv.status_reason) or RESULT_WORDS.get(inv.status, inv.status)}"
+                 for inv in waiting[:LINES_PER_SECTION]]
+        if n_waiting > LINES_PER_SECTION:
+            lines.append(f"…and {n_waiting - LINES_PER_SECTION} more")
+        parts.append(f"{n_waiting} invoice{'s are' if n_waiting != 1 else ' is'} waiting for review:\n" + "\n".join(lines))
+    else:
+        parts.append("Nothing is waiting for your review.")
+    if n_reading:
+        parts.append(f"{n_reading} file{'s are' if n_reading != 1 else ' is'} still being read.")
+    if n_waiting:
+        parts.append("Open the invoice app to review them.")
+    return "\n\n".join(parts)
+
+
 def reply(user_id: int, number: str, text: str, label: str = "reply") -> None:
     """A free-form answer inside the 24-hour window the person just opened. Not counted in the daily cap."""
     result = outbound.send_whatsapp(number, text)
@@ -632,7 +695,9 @@ def on_incoming(user_id: int, sender: str, body: str, has_media: bool) -> None:
             answer = _handle_text(session, user_id, number, text, has_media, now)
             session.commit()
         if answer:
-            reply(user_id, number, answer, "help" if answer in (HELP_WITH_WAITING, HELP_NOTHING) else "reply")
+            label = "help" if answer in (HELP_WITH_WAITING, HELP_NOTHING) else \
+                "status" if text in STATUS_WORDS else "reply"
+            reply(user_id, number, answer, label)
     except Exception as e:
         log.error("Could not handle an incoming WhatsApp reply: %s", type(e).__name__)
 
@@ -644,10 +709,132 @@ def acknowledge_file(user_id: int, sender: str, created: bool) -> None:
               if created else "That file was already received, so I haven't queued it again.", "receipt")
 
 
-def notify_unreadable(user_id: int, sender: str) -> None:
+def notify_unreadable(user_id: int, sender: str, why: str | None = None) -> None:
+    """An attachment that can't be used. `why` is a reason meant for the sender (unsupported type, too
+    large, damaged), never a technical one."""
     if settings.followup_enabled and (number := whatsapp.normalize_number(sender)):
-        reply(user_id, number, "I couldn't use one of your attachments. It may be an unsupported type, too large or "
-              "damaged. Please send a PDF or a photo of the invoice again.", "unreadable")
+        because = f": {why}" if why else ". It may be an unsupported type, too large or damaged"
+        reply(user_id, number, f"I couldn't use one of your attachments{because}. "
+              "Please send a PDF or a photo of the invoice again.", "unreadable")
+
+
+def notify_retrying(user_id: int, sender: str) -> None:
+    """A download failed for a passing reason; it is tried again by itself (whatsapp.retry_due)."""
+    if settings.followup_enabled and (number := whatsapp.normalize_number(sender)):
+        reply(user_id, number, "I couldn't download one of your attachments yet. I will try again in a few minutes; "
+              "there's no need to send it again.", "retrying")
+
+
+# ---------- one-click choices in reminder emails (D-107)
+#
+# Each link carries the person, the follow-ups the email was about, the choice and an expiry, signed
+# with ACTION_LINK_SECRET (else COMPOSIO_API_KEY). Opening a link only shows a page with a button; the
+# choice is made by pressing it (a POST), so mail scanners that open links don't make it for them.
+
+class BadLink(Exception):
+    def __init__(self, message: str, status: int = 400):
+        super().__init__(message)
+        self.status = status
+
+
+def _link_key() -> bytes | None:
+    key = settings.action_link_secret or settings.composio_api_key
+    return key.encode() if key else None
+
+
+def _sign(body: str, key: bytes) -> str:
+    return hmac.new(key, b"followup-action|" + body.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def action_token(user_id: int, fu_ids: list[int], action: str, now: datetime | None = None) -> str | None:
+    key = _link_key()
+    if key is None or action not in EMAIL_ACTIONS:
+        return None
+    expires = int(((now or _now()) + timedelta(days=ACTION_LINK_DAYS)).timestamp())
+    payload = f"{user_id}:{','.join(str(i) for i in sorted(fu_ids))}:{action}:{expires}"
+    body = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+    return f"{body}.{_sign(body, key)}"
+
+
+def read_action_token(token: str, now: datetime | None = None) -> tuple[int, list[int], str]:
+    """(user id, follow-up ids, choice) from a link, or BadLink."""
+    key = _link_key()
+    body, _, signature = (token or "").partition(".")
+    if key is None or not body or not hmac.compare_digest(_sign(body, key), signature):
+        raise BadLink("This link is not valid. Use the buttons in the latest reminder email.")
+    try:
+        user_id, ids, action, expires = base64.urlsafe_b64decode(body + "=" * (-len(body) % 4)).decode().split(":")
+        user_id, ids, expires = int(user_id), [int(i) for i in ids.split(",") if i], int(expires)
+    except ValueError:
+        raise BadLink("This link is not valid. Use the buttons in the latest reminder email.") from None
+    if action not in EMAIL_ACTIONS:
+        raise BadLink("This link is not valid. Use the buttons in the latest reminder email.")
+    if (now or _now()).timestamp() > expires:
+        raise BadLink(f"This link has expired (links work for {ACTION_LINK_DAYS} days). "
+                      "Use the buttons in the latest reminder email.", 410)
+    return user_id, ids, action
+
+
+def action_links(user_id: int, fu_ids: list[int]) -> dict[str, str] | None:
+    """{choice: URL} for a reminder email, or None when links can't be made (no PUBLIC_BASE_URL or key)."""
+    base = settings.public_base_url.rstrip("/")
+    if not base or _link_key() is None:
+        return None
+    return {action: f"{base}/api/v1/followups/action?t={action_token(user_id, fu_ids, action)}"
+            for action in EMAIL_ACTIONS}
+
+
+def describe_action(token: str) -> str:
+    """What pressing the button will do (shown before the choice is made)."""
+    _, ids, action = read_action_token(token)
+    what = f"{len(ids)} invoice{'s' if len(ids) != 1 else ''}"
+    return {"handling": f"Pause the reminders about {what} for {settings.followup_ack_hours:g} hours, "
+                        "because you are handling them.",
+            "later": f"Remind you about {what} again in {settings.followup_snooze_hours:g} hours.",
+            "stop": f"Stop the reminders about {what}. (They also stop by themselves once each invoice is dealt with.)"
+            }[action]
+
+
+def apply_action(session: Session, token: str) -> str:
+    """Make the choice from an email link. Like a WhatsApp reply it only moves reminders, and only the
+    follow-ups that email was about, for the person it was sent to."""
+    user_id, ids, action = read_action_token(token)
+    now = _now()
+    fus = [fu for fu in session.scalars(select(FollowUp).where(FollowUp.id.in_(ids), FollowUp.target_user_id == user_id)
+                                        .with_for_update()) if fu.state == "active"]
+    if not fus:
+        return "Nothing to change: these reminders have already ended (the invoices were dealt with, or the reminders were stopped)."
+    for fu in fus:
+        if action == "handling":
+            _pause(fu, now, settings.followup_ack_hours)
+        elif action == "later":
+            _pause(fu, now, settings.followup_snooze_hours)
+        else:
+            _close(fu, "stopped")
+        _event(session, fu.id, user_id, "email", "in", "reply", action)
+    session.commit()
+    what = f"{len(fus)} invoice{'s' if len(fus) != 1 else ''}"
+    if action == "handling":
+        return f"Thanks. You won't be reminded about {what} for {settings.followup_ack_hours:g} hours."
+    if action == "later":
+        return f"OK, you will be reminded about {what} in {settings.followup_snooze_hours:g} hours."
+    return f"OK, no more reminders about {what}."
+
+
+def action_page(title: str, text: str, token: str | None = None) -> str:
+    """A small page for the email links: the explanation, and (before the choice) the button that makes it."""
+    form = ""
+    if token:
+        form = ('<form method="post" action="/api/v1/followups/action">'
+                f'<input type="hidden" name="t" value="{html.escape(token)}">'
+                '<button type="submit" style="padding:10px 18px;font-size:16px;border:0;border-radius:6px;'
+                'background:#1a73e8;color:#fff;cursor:pointer">Confirm</button></form>')
+    return ('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,'
+            'initial-scale=1"><title>Invoice reminders</title></head><body style="font-family:system-ui,sans-serif;'
+            'max-width:520px;margin:40px auto;padding:0 16px;color:#202124">'
+            f"<h2>{html.escape(title)}</h2><p>{html.escape(text)}</p>{form}"
+            '<p style="color:#888;font-size:13px">This only changes reminders. Approving and rejecting invoices '
+            "happen in the invoice app.</p></body></html>")
 
 
 # ---------- phone calls (app/voice.py)

@@ -12,7 +12,7 @@ from app.config import settings
 from app.documents import MAX_FILES_PER_UPLOAD, expand
 from app.models import Status
 from tests.conftest import make_extracted
-from tests.test_flow import client, excel_rows, fake_extract, get, h, run_worker, upload   # noqa: F401
+from tests.test_flow import client, excel_rows, fake_extract, get, h, run_worker, upload  # noqa: F401
 
 MB = 1024 * 1024
 BODY_INVOICE = ("TAX INVOICE No. INV-77 from Sri Lakshmi Steels GSTIN 36AAACS1234A1Z3. "

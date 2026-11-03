@@ -3,11 +3,10 @@ from datetime import date, timedelta
 
 from app.models import Invoice, Status
 from app.pipeline import validate as validate_mod
-from app.pipeline.checks import PASS, WARN, FAIL
+from app.pipeline.checks import FAIL, PASS, WARN
 from app.pipeline.decide import decide
-from app.pipeline.validate import (gstin_valid, normalize_invoice_no, normalize_extracted,
-                                   financial_year, validate)
-from tests.conftest import make_extracted, not_an_invoice, SUPPLIER_GSTIN, OTHER_GSTIN
+from app.pipeline.validate import financial_year, gstin_valid, normalize_extracted, normalize_invoice_no, validate
+from tests.conftest import OTHER_GSTIN, SUPPLIER_GSTIN, make_extracted, not_an_invoice
 
 
 def by_name(result):

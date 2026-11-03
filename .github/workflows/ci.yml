@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ap
+          POSTGRES_PASSWORD: ap
+          POSTGRES_DB: ap_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ap" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://ap:ap@localhost:5432/ap_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Lint
+        run: ruff check app tests scripts migrations
+      - name: Tests (no OpenAI, Composio or Twilio calls; everything outside is faked)
+        run: pytest -q

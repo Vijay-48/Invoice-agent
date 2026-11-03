@@ -43,6 +43,8 @@ INSTRUCTIONS = [
     "import, else regular. reference_invoice_number: the invoice a note or reminder refers to. "
     "currency: ISO code of the amounts as printed ('$' or US address = USD, '€' = EUR, '₹'/Rs = INR); "
     "INR only if no other currency is shown. irn if printed. voucher_number, voucher_date: null.\n"
+    "- supplier_bank_account, supplier_ifsc: the supplier's bank details printed for payment (A/c No., "
+    "IFSC), exactly as printed; null if none.\n"
     "- hsn_summary: copy the printed HSN/SAC-wise summary table, one row per HSN (taxable value, total "
     "tax); [] if the document has none.",
 
@@ -257,7 +259,7 @@ def extract_invoice(file_path: str, name: str | None = None, model: str | None =
         log.error("AI returned no invoice data: %s", message)
         raise ValueError(f"Extractor returned unexpected output: {result.content!r}")
     d = result.content
-    if d.hsn_summary and not hsn_summary_printed(text, any(l.hsn_sac for l in d.lines)):
+    if d.hsn_summary and not hsn_summary_printed(text, any(ln.hsn_sac for ln in d.lines)):
         # Asked to copy the table, the AI also builds one from the lines when none is printed; such a
         # summary only agrees with itself (D-95). Scans have no text to confirm the table with.
         log.info("'%s': HSN summary not found in the document's text; ignored", name)

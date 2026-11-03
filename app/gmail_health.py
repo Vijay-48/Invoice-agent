@@ -71,7 +71,7 @@ def record(session: Session, user: User, status: str, detail: str | None = None)
 def check(session: Session, user: User) -> GmailHealth | None:
     """Ask Composio about the user's connection. Returns None (nothing recorded) when it can't
     be reached: being offline says nothing about the Gmail access."""
-    from app import gmail   # gmail imports this module
+    from app import gmail  # gmail imports this module
     if not user.gmail_account_id:
         return None
     try:

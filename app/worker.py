@@ -11,16 +11,17 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from app import migrate
 from app.config import settings
-from app.db import Base, SessionLocal, engine
+from app.db import SessionLocal
 from app.excel import try_export
-from app.logs import setup_logging, timed
 from app.gmail import email_hints
+from app.logs import setup_logging, timed
 from app.models import Invoice, PdfPassword, Status, audit
-from app.pipeline.learning import correction_notes
-from app.pipeline.reading import read_document
 from app.pipeline.evaluate import evaluate, pages_check
 from app.pipeline.extract import AIAccountProblem, AIServiceUnavailable, PasswordRequired, extract_invoice, page_count
+from app.pipeline.learning import correction_notes
+from app.pipeline.reading import read_document
 
 log = logging.getLogger("worker")
 MAX_ATTEMPTS = 3
@@ -36,7 +37,7 @@ def _ai_problem(kind: str, message: str) -> None:
         ai_status["since"] = datetime.now(timezone.utc)
     ai_status.update(problem=message[:300], kind=kind)
 
- 
+
 def _ai_ok() -> None:
     if ai_status["problem"]:
         log.info("AI service works again")
@@ -229,7 +230,7 @@ def main():
     WORKER_CONCURRENCY documents at a time. Several processes, even on several PCs, can share
     one database: each document is still read once."""
     setup_logging()
-    Base.metadata.create_all(engine)
+    migrate.upgrade_on_start()
     stop = threading.Event()
     # Approved invoices are written to Excel by the API process (its workers or its export loop)
     threads = [threading.Thread(target=run, args=(stop, False), name="worker" if i == 0 else f"worker-{i + 1}",

@@ -17,8 +17,8 @@ from app.models import User
 from app.pipeline import einvoice, extract
 from tests.conftest import make_extracted
 from tests.test_assistant import FakeStreamAgent
-from tests.test_flow import client, fake_extract, get, upload   # noqa: F401 (fixtures)
-from tests.test_gmail import fake   # noqa: F401 (fixture)
+from tests.test_flow import client, fake_extract, get, upload  # noqa: F401 (fixtures)
+from tests.test_gmail import fake  # noqa: F401 (fixture)
 
 GOLDEN = Path(__file__).resolve().parent.parent / "golden" / "docs"
 

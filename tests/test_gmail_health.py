@@ -9,7 +9,7 @@ from app.api import app
 from app.config import settings
 from app.db import SessionLocal
 from app.models import GmailHealth, User
-from tests.test_gmail import fake   # noqa: F401 (fixture)
+from tests.test_gmail import fake  # noqa: F401 (fixture)
 
 
 def test_expired_access_is_detected_and_cleared(users, fake, session):
@@ -179,8 +179,9 @@ def _link_email(text):
 
 
 def test_invoice_behind_an_allowed_link_is_downloaded(users, fake, session, monkeypatch):
-    from app.models import EmailMessage, Invoice
     from sqlalchemy import select
+
+    from app.models import EmailMessage, Invoice
     monkeypatch.setattr(settings, "gmail_link_domains", "zoho.in")
     pdf = b"%PDF-1.4 link invoice"
     seen = _portal(monkeypatch, {
@@ -198,8 +199,9 @@ def test_invoice_behind_an_allowed_link_is_downloaded(users, fake, session, monk
 
 
 def test_links_are_never_followed_outside_the_allow_list(users, fake, session, monkeypatch):
-    from app.models import EmailMessage
     from sqlalchemy import select
+
+    from app.models import EmailMessage
     monkeypatch.setattr(settings, "gmail_link_domains", "zoho.in")
     monkeypatch.setattr(settings, "gmail_read_body_invoices", False)
     seen = _portal(monkeypatch, {

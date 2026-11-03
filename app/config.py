@@ -5,6 +5,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "postgresql+psycopg://ap:ap@localhost:5432/ap"
+    migrate_on_start: bool = True               # apply database migrations on start (app/migrate.py)
+    # Shared secret every API request must carry (X-API-Key); empty = open to anyone who can reach the
+    # server. Webhooks, health checks and the Gmail callback don't need it (app/security.py)
+    api_key: str = ""
     storage_dir: str = "./storage"              # original invoice files
     excel_path: str = "./output/invoices.xlsx"  # approved invoices are appended here...
     excel_per_financial_year: bool = True       # ...as "invoices FY2026-27.xlsx", one per financial year
@@ -112,6 +116,9 @@ class Settings(BaseSettings):
     # (comma-separated). Sent from a connected Gmail: this user's, 0 = REPORT_SENDER_USER_ID's / the first
     followup_email_to: str = ""
     followup_email_sender_user_id: int = 0
+    # Signs the one-click links in reminder emails ("I'm handling it" / "Remind me later" / "Stop"); empty =
+    # COMPOSIO_API_KEY is used. The links point at PUBLIC_BASE_URL: without it the emails have no buttons.
+    action_link_secret: str = ""
     followup_batch: int = 50                     # follow-ups handled per check
     twilio_whatsapp_from: str = ""               # "whatsapp:+14155238886" (sandbox) or your approved sender
     # Content template (HX...) for messages outside WhatsApp's 24-hour window; empty = those are skipped.

@@ -14,8 +14,7 @@ from app.pipeline.extract import AIServiceUnavailable
 from app.pipeline.validate import normalize_extracted
 from tests.conftest import make_extracted
 from tests.test_assistant import FakeStreamAgent, sse_events
-from tests.test_flow import client, fake_extract, get, h, run_worker, upload   # noqa: F401 (fixtures)
-
+from tests.test_flow import client, fake_extract, get, h, run_worker, upload  # noqa: F401 (fixtures)
 
 # ---------- worker
 

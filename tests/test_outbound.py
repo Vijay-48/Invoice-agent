@@ -129,6 +129,7 @@ def test_an_error_that_is_not_twilios_shows_only_its_class(monkeypatch):
 
 def test_reminder_email_through_gmail(monkeypatch):
     from types import SimpleNamespace
+
     from app import gmail
     sent = []
     monkeypatch.setattr(gmail, "send_email", lambda user, to, subject, body: sent.append((user.email, to, subject)))

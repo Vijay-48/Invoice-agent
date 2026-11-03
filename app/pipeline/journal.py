@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import Invoice, Status, audit
-from app.pipeline.checks import Check, PASS, WARN, FAIL
+from app.pipeline.checks import FAIL, PASS, WARN, Check
 from app.schemas import ExtractedInvoice
 
 log = logging.getLogger("journal")
@@ -62,7 +62,7 @@ def _same_amount(a, b: float) -> bool:
 
 def check_journal(session: Session, inv: Invoice, data: ExtractedInvoice) -> tuple[list[Check], int | None]:
     """Checks for a journal entry; returns (checks, id of the invoice it belongs to)."""
-    from app.pipeline.validate import parse_date, arithmetic_checks   # avoid an import cycle
+    from app.pipeline.validate import arithmetic_checks, parse_date  # avoid an import cycle
     checks: list[Check] = []
     if not data.supplier_name:
         checks.append(Check("supplier_name", FAIL, "Journal doesn't name the supplier (party credited)"))

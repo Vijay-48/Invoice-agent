@@ -1,7 +1,7 @@
 """Decision Engine: plain rules, so every outcome is explainable."""
 from app.config import settings
 from app.models import Status
-from app.pipeline.checks import WARN, FAIL
+from app.pipeline.checks import FAIL, WARN
 from app.pipeline.validate import Validation
 from app.schemas import ExtractedInvoice
 

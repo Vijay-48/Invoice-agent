@@ -1,22 +1,25 @@
-fastapi
-uvicorn[standard]
-python-multipart
-email-validator
-sqlalchemy>=2.0
-psycopg[binary]
-pydantic-settings
-agno
-openai
-pymupdf
-composio
-openpyxl
-httpx
-twilio>=9.0
-anyio
-python-docx
-numpy
+# Runtime dependencies, pinned to the versions the 417 tests pass with (2026-10-30).
+# Upgrade deliberately: change a pin, run `pytest` and the golden set (scripts/evaluate.py), then commit.
+fastapi==0.136.1
+uvicorn[standard]==0.46.0
+python-multipart==0.0.27
+email-validator==2.3.0
+sqlalchemy==2.0.49
+alembic==1.18.4
+psycopg[binary]==3.3.3
+pydantic-settings==2.14.0
+agno==3.1.1
+openai==3.14.1
+pymupdf==1.27.2.3
+composio==0.21.1
+openpyxl==3.1.5
+httpx==0.28.1
+twilio==9.12.0
+anyio==4.13.0
+python-docx==1.2.0
+numpy==2.3.5
 # e-invoice QR: QRCodeDetectorAruco needs OpenCV 4.8 or later (any opencv-python variant works)
-opencv-python-headless>=4.8
-PyJWT
-cryptography
+opencv-python-headless==4.13.0.92
+PyJWT==2.12.1
+cryptography==47.0.0
 # optional, reads dense QR codes more reliably than OpenCV: zxing-cpp

@@ -11,19 +11,27 @@ Duplicates are skipped (same email + file name, or same file contents).
 import logging
 import queue
 import threading
-from concurrent.futures import ThreadPoolExecutor
 import time
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
-from app.db import Base, SessionLocal, engine
-from app.logs import setup_logging
+from app import gmail_health, migrate
 from app.config import settings
-from app.gmail import (TRIGGER, _composio, handle_event, is_network_error, reconcile_user, sync_user,
-                       update_labels, _message_time)
-from app import gmail_health
+from app.db import SessionLocal
+from app.gmail import (
+    TRIGGER,
+    _composio,
+    _message_time,
+    handle_event,
+    is_network_error,
+    reconcile_user,
+    sync_user,
+    update_labels,
+)
+from app.logs import setup_logging
 from app.models import User
 
 log = logging.getLogger("gmail_listener")
@@ -352,7 +360,7 @@ def _watch(subscription, stop: threading.Event) -> str | None:
 
 def main():
     setup_logging()
-    Base.metadata.create_all(engine)
+    migrate.upgrade_on_start()
     stop = threading.Event()
     try:
         run(stop)

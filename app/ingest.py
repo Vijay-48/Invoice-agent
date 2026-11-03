@@ -1,4 +1,4 @@
-"""Single entry point for every channel (upload, Gmail, later WhatsApp).
+"""Single entry point for every channel (upload, Gmail, WhatsApp).
 Channels only call ingest_document(); everything after that is shared."""
 import hashlib
 import logging
@@ -9,17 +9,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.documents import DOCUMENT_EXT, MIME_EXT, kind  # noqa: F401  (MIME_EXT re-exported)
+from app.documents import kind
 from app.models import Invoice, Status, audit
 
 log = logging.getLogger("ingest")
-ALLOWED_EXT = DOCUMENT_EXT
-
-
-def is_supported(filename: str) -> bool:
-    """A document we can read (PDF, image, Excel/CSV/Word). Containers (.zip, .eml) are
-    unpacked by the caller with app.documents.expand()."""
-    return Path(filename).suffix.lower() in ALLOWED_EXT
 
 
 def is_accepted(filename: str) -> bool:

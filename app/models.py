@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import String, Numeric, ForeignKey, DateTime, Text, Integer, Index, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -31,6 +31,9 @@ class User(Base):
     gmail_trigger_id: Mapped[str | None] = mapped_column(String(100))
     gmail_connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     gmail_last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # WhatsApp number (+919876543210) this user sends invoices from and is reminded at; WHATSAPP_SENDERS
+    # in .env still works too (D-106)
+    whatsapp_number: Mapped[str | None] = mapped_column(String(20), unique=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -243,6 +246,115 @@ class WhatsAppSession(Base):
     __tablename__ = "whatsapp_sessions"
     number: Mapped[str] = mapped_column(String(20), primary_key=True)      # +919876543210
     last_inbound_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class WhatsAppMessage(Base):
+    """One incoming WhatsApp message (Twilio's MessageSid is unique, so a webhook Twilio retries is handled
+    once). Holds no text: only who (masked), what kind and how many attachments (D-106)."""
+    __tablename__ = "whatsapp_messages"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    message_sid: Mapped[str] = mapped_column(String(64), unique=True)
+    sender: Mapped[str] = mapped_column(String(40))                      # masked: whatsapp:+91******3210
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), index=True)   # None = unknown sender
+    kind: Mapped[str] = mapped_column(String(20))                        # files | text | ignored
+    text_length: Mapped[int] = mapped_column(Integer, default=0)
+    media_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class WhatsAppMedia(Base):
+    """One attachment of a WhatsApp message and what became of it. A download that failed for a passing
+    reason (network, Twilio, database) is tried again later from this row (app/whatsapp.py retry_due)."""
+    __tablename__ = "whatsapp_media"
+    __table_args__ = (UniqueConstraint("message_id", "position"), Index("ix_whatsapp_media_retry", "status", "next_try_at"))
+    id: Mapped[int] = mapped_column(primary_key=True)
+    message_id: Mapped[int] = mapped_column(ForeignKey("whatsapp_messages.id", ondelete="CASCADE"))
+    position: Mapped[int] = mapped_column(Integer)
+    url: Mapped[str] = mapped_column(Text)                               # api.twilio.com media URL (needs our credentials)
+    content_type: Mapped[str] = mapped_column(String(100))
+    # pending | ingested | duplicate | rejected (the file itself is not usable) | failed (will be tried again) | gave_up
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    reason: Mapped[str | None] = mapped_column(String(300))
+    invoice_id: Mapped[int | None] = mapped_column(ForeignKey("invoices.id", ondelete="SET NULL"))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_try_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class Supplier(Base):
+    """Supplier master, one row per GSTIN, made when its first invoice is approved. Holds the bank account
+    payments go to: set from the first approved invoice that shows one, changed only by a person who
+    confirmed the change with the supplier (app/pipeline/supplier.py, D-104)."""
+    __tablename__ = "suppliers"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    gstin: Mapped[str] = mapped_column(String(15), unique=True)
+    name: Mapped[str] = mapped_column(String(255))
+    pan: Mapped[str | None] = mapped_column(String(10))                   # characters 3-12 of the GSTIN
+    bank_account: Mapped[str | None] = mapped_column(String(34))
+    bank_ifsc: Mapped[str | None] = mapped_column(String(11))
+    bank_set_by: Mapped[str | None] = mapped_column(String(100))          # "auto" (first invoice) or a user
+    bank_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    bank_source_invoice_id: Mapped[int | None] = mapped_column(ForeignKey("invoices.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class SupplierEvent(Base):
+    """What happened to a supplier's record: bank details recorded, a change held, a change confirmed."""
+    __tablename__ = "supplier_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    supplier_id: Mapped[int] = mapped_column(ForeignKey("suppliers.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(30))        # created | bank_recorded | bank_confirmed
+    invoice_id: Mapped[int | None] = mapped_column(ForeignKey("invoices.id"))
+    actor: Mapped[str] = mapped_column(String(100), default="system")
+    message: Mapped[str] = mapped_column(Text)
+    data: Mapped[dict | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Gstr2bReturn(Base):
+    """One uploaded GSTR-2B (the GST portal's monthly statement of what suppliers filed for us). Uploading the
+    same GSTIN and month again replaces it (app/gstr2b.py, D-105)."""
+    __tablename__ = "gstr2b_returns"
+    __table_args__ = (UniqueConstraint("gstin", "period"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    gstin: Mapped[str] = mapped_column(String(15))                 # ours (the recipient)
+    period: Mapped[str] = mapped_column(String(7))                 # YYYY-MM
+    generated_on: Mapped[str | None] = mapped_column(String(10))   # as the portal states it
+    file_name: Mapped[str] = mapped_column(String(255))
+    file_hash: Mapped[str] = mapped_column(String(64))
+    documents: Mapped[int] = mapped_column(Integer, default=0)
+    uploaded_by: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Gstr2bDocument(Base):
+    """One supplier document listed in a GSTR-2B: an invoice, or a credit/debit note."""
+    __tablename__ = "gstr2b_documents"
+    __table_args__ = (Index("ix_gstr2b_documents_match", "supplier_gstin", "number_norm"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    return_id: Mapped[int] = mapped_column(ForeignKey("gstr2b_returns.id", ondelete="CASCADE"), index=True)
+    section: Mapped[str] = mapped_column(String(10))               # b2b | b2ba | cdnr | cdnra
+    doc_type: Mapped[str] = mapped_column(String(15))              # invoice | credit_note | debit_note
+    supplier_gstin: Mapped[str] = mapped_column(String(15))
+    supplier_name: Mapped[str | None] = mapped_column(String(255))
+    number: Mapped[str] = mapped_column(String(100))
+    number_norm: Mapped[str] = mapped_column(String(100))
+    doc_date: Mapped[str | None] = mapped_column(String(10))       # YYYY-MM-DD
+    taxable: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    igst: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    cgst: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    sgst: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    cess: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    total: Mapped[float] = mapped_column(Numeric(14, 2), default=0)
+    itc_available: Mapped[bool] = mapped_column(default=True)
+    itc_reason: Mapped[str | None] = mapped_column(String(100))
+    reverse_charge: Mapped[bool] = mapped_column(default=False)
+    supplier_filed_on: Mapped[str | None] = mapped_column(String(10))
 
 
 def audit(session, invoice_id: int, stage: str, message: str, data: dict | None = None, actor="system"):

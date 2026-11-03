@@ -12,12 +12,12 @@ All Composio calls go through _composio(), execute() and download(), which tests
 import logging
 import re
 import threading
-import weakref
-from contextlib import contextmanager
-from collections import Counter
-from email.utils import parseaddr
 import time
+import weakref
+from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from email.utils import parseaddr
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import unquote
@@ -29,10 +29,9 @@ from sqlalchemy.orm import Session
 
 from app import outbound
 from app.config import settings
-from app.logs import timed
-from app.documents import (IMAGE_EXT, LOGO_MAX_BYTES, body_to_pdf, expand, looks_like_invoice_text,
-                           with_extension)
+from app.documents import IMAGE_EXT, LOGO_MAX_BYTES, body_to_pdf, expand, looks_like_invoice_text, with_extension
 from app.ingest import ingest_document
+from app.logs import timed
 from app.models import AuditLog, EmailMessage, GmailLabel, Invoice, Status, User, audit
 
 log = logging.getLogger("gmail")
@@ -56,7 +55,7 @@ def _composio():
 
 @lru_cache
 def _make_composio():
-    from composio import Composio   # imported lazily so the API starts without a key
+    from composio import Composio  # imported lazily so the API starts without a key
     if not settings.composio_api_key:
         raise RuntimeError("COMPOSIO_API_KEY is not set in .env")
     log.info("Composio client ready (gmail toolkit %s)", settings.composio_gmail_version)
@@ -69,7 +68,7 @@ class NetworkError(Exception):
 
 
 def is_network_error(e: BaseException) -> bool:
-    import composio_client   # lazy, like the Composio client itself
+    import composio_client  # lazy, like the Composio client itself
     return isinstance(e, (NetworkError, composio_client.APIConnectionError, composio_client.RateLimitError,
                           composio_client.InternalServerError, httpx.TransportError))
 
@@ -158,7 +157,7 @@ def connect_link(user: User) -> str:
 
 def _activate_when_connected(user_id: int, account_id: str, timeout_minutes: int = 15) -> None:
     """Wait for the user to finish the Gmail consent screen, then activate."""
-    from app.db import SessionLocal   # avoid an import cycle at module load
+    from app.db import SessionLocal  # avoid an import cycle at module load
     deadline = time.monotonic() + timeout_minutes * 60
     log.info("Waiting up to %d min for user %s to allow Gmail access (%s)", timeout_minutes, user_id, account_id)
     while time.monotonic() < deadline:

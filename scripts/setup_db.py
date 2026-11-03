@@ -1,11 +1,10 @@
 """One-time local setup, no Docker: creates the `ap` role, the `ap` and `ap_test`
-databases, a .env file if missing, and the tables.
+databases, a .env file if missing, and the tables (through the migrations, app/migrate.py).
 
     python -m scripts.setup_db
 
 Asks for the password of the PostgreSQL superuser (`postgres`) that you chose when
 installing PostgreSQL. Set PGUSER / PGPASSWORD / PGHOST / PGPORT to skip the prompt.
-Add --reset to delete tables left by the previous version of this app.
 """
 import getpass
 import os
@@ -60,24 +59,8 @@ def main():
         shutil.copy(".env.example", env)
         print("Created .env from .env.example: put your OPENAI_API_KEY and COMPOSIO_API_KEY in it")
 
-    from sqlalchemy import inspect, text
-    from app.db import Base, engine
-    import app.models  # noqa: F401  (registers the tables)
-
-    # Tables from the previous version (PO matching, ledgers) have a different shape
-    insp = inspect(engine)
-    old = "purchase_orders" in insp.get_table_names() or (
-        "invoices" in insp.get_table_names()
-        and "user_id" not in {c["name"] for c in insp.get_columns("invoices")})
-    if old:
-        if "--reset" not in sys.argv:
-            sys.exit("The 'ap' database has tables from the previous version of this app.\n"
-                     "Run  python -m scripts.setup_db --reset  to delete them and start fresh\n"
-                     "(this deletes all invoice records in the 'ap' database).")
-        with engine.begin() as conn:
-            conn.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
-        print("Removed the previous version's tables")
-    Base.metadata.create_all(engine)
+    from app import migrate
+    migrate.upgrade()
     print("Tables ready")
     print("\nDone. Start the API with:  uvicorn app.api:app --reload")
 

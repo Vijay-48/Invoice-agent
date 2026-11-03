@@ -60,8 +60,8 @@ def main():
         shutil.copy(src, dest)
         d = inv.extracted
         expected = {k: d.get(k) for k in FIELDS if k in d}
-        expected["lines"] = [{k: l[k] for k in ("description", "quantity", "unit_price", "taxable_value", "gst_rate")}
-                             for l in d.get("lines", [])]
+        expected["lines"] = [{k: ln[k] for k in ("description", "quantity", "unit_price", "taxable_value", "gst_rate")}
+                             for ln in d.get("lines", [])]
         decision = expected_decision(inv)
         if decision:
             expected["decision"] = decision

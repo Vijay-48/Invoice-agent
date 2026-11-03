@@ -1,5 +1,5 @@
 """Scoring rules of the golden-set evaluation (app/evaluation.py). No AI calls."""
-from app.evaluation import compare, predict_decision, same_value, DocResult, FieldResult
+from app.evaluation import DocResult, FieldResult, compare, predict_decision, same_value
 from app.models import Status
 from tests.conftest import make_extracted, not_an_invoice
 

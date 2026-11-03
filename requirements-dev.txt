@@ -1,0 +1,4 @@
+# Tests and lint: pip install -r requirements-dev.txt
+-r requirements.txt
+pytest==8.4.2
+ruff==0.12.0

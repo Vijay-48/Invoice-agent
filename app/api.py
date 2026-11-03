@@ -5,50 +5,65 @@ No login yet: the acting user is passed in the X-User-Id header.
 """
 import asyncio
 import html
-
-import anyio
 import json
 import logging
 import threading
 import time
-
-import pymupdf
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, UploadFile, File, Depends, Header, HTTPException, APIRouter, Query, Request
+import anyio
+import pymupdf
+from fastapi import APIRouter, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, EmailStr, Field, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, object_session
 
-from app import followup, gmail, voice, whatsapp
+from app import chat_store, followup, gmail, gstr2b, migrate, security, voice, whatsapp
 from app.background import Background
 from app.config import settings
-from app.db import Base, SessionLocal, engine, get_session
-from app.excel import find_workbook, list_workbooks, try_export
-from app.logs import setup_logging
+from app.db import SessionLocal, get_session
 from app.documents import PDF_LOCK, expand
+from app.excel import find_workbook, list_workbooks, try_export
 from app.ingest import ingest_document, is_accepted
-from app import chat_store
-from app.models import (Invoice, AuditLog, ChatMessage, ChatSession, EmailMessage, FollowUp, FollowUpEvent,
-                        PdfPassword, User, Status, VoiceCall, audit)
+from app.logs import setup_logging
+from app.models import (
+    AuditLog,
+    ChatMessage,
+    ChatSession,
+    EmailMessage,
+    FollowUp,
+    FollowUpEvent,
+    Gstr2bReturn,
+    Invoice,
+    PdfPassword,
+    Status,
+    Supplier,
+    SupplierEvent,
+    User,
+    VoiceCall,
+    WhatsAppMedia,
+    WhatsAppMessage,
+    audit,
+)
+from app.pipeline import supplier as supplier_master
 from app.pipeline.evaluate import evaluate
-from app.pipeline.supplier import list_suppliers
 from app.schemas import InvoiceCorrection, from_stored
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()   # worker/Gmail logs next to uvicorn's; LOG_LEVEL=DEBUG for more
+    security.warn_if_open()
     # Blocking endpoints (files, Excel, Gmail) run in a thread pool: room for many users at once
     anyio.to_thread.current_default_thread_limiter().total_tokens = settings.api_threads
-    Base.metadata.create_all(engine)   # use Alembic migrations once the schema settles
+    migrate.upgrade_on_start()          # database migrations (Alembic)
     background = Background()
     background.start()                 # worker + Gmail listener, in this process
     yield
@@ -57,6 +72,7 @@ async def lifespan(app: FastAPI):
 
 log = logging.getLogger("api")
 app = FastAPI(title="Invoice Processing", lifespan=lifespan)
+app.add_middleware(security.ApiKeyMiddleware)
 api = APIRouter(prefix="/api/v1")
 
 
@@ -94,6 +110,7 @@ def serialize_user(u: User) -> dict:
     session = object_session(u)
     health = gmail_health.health_of(session, u) if session is not None and u.gmail_account_id else None
     return {"id": u.id, "name": u.name, "email": u.email,
+            "whatsapp": whatsapp.mask_sender(u.whatsapp_number) if u.whatsapp_number else None,
             "gmail": {"connected": bool(u.gmail_account_id), "trigger_id": u.gmail_trigger_id,
                       "connected_at": u.gmail_connected_at, "last_sync_at": u.gmail_last_sync_at,
                       # "reconnect" = Gmail access expired or was removed: connect again
@@ -109,7 +126,7 @@ def create_user(body: NewUser, session: Session = Depends(get_session)):
     try:
         session.commit()
     except IntegrityError:
-        raise HTTPException(409, "A user with this email already exists")
+        raise HTTPException(409, "A user with this email already exists") from None
     log.info("User %s created: %s <%s>", user.id, user.name, user.email)
     return serialize_user(user)
 
@@ -124,11 +141,41 @@ def get_user(user_id: int, session: Session = Depends(get_session)):
     return serialize_user(session.get(User, user_id) or _404("User"))
 
 
+class WhatsAppNumber(BaseModel):
+    number: str = Field(min_length=8, max_length=30, description="e.g. +919876543210")
+
+
+@api.put("/users/{user_id}/whatsapp")
+def set_whatsapp_number(user_id: int, body: WhatsAppNumber, session: Session = Depends(get_session)):
+    """The WhatsApp number this user sends invoices from and is reminded at. Takes effect at once (no
+    restart); WHATSAPP_SENDERS in .env keeps working for numbers not stored here."""
+    user = session.get(User, user_id) or _404("User")
+    number = whatsapp.normalize_number(body.number)
+    if number is None:
+        raise HTTPException(422, "Not a phone number: use the international form, e.g. +919876543210")
+    user.whatsapp_number = number
+    try:
+        session.commit()
+    except IntegrityError:
+        raise HTTPException(409, "Another user already has this WhatsApp number") from None
+    log.info("User %s WhatsApp number set to %s", user.id, whatsapp.mask_sender(number))
+    return serialize_user(user)
+
+
+@api.delete("/users/{user_id}/whatsapp")
+def remove_whatsapp_number(user_id: int, session: Session = Depends(get_session)):
+    user = session.get(User, user_id) or _404("User")
+    user.whatsapp_number = None
+    session.commit()
+    log.info("User %s WhatsApp number removed", user.id)
+    return serialize_user(user)
+
+
 def _composio_call(fn, *args):
     try:
         return fn(*args)
     except gmail.GmailNotConnected as e:
-        raise HTTPException(409, str(e))
+        raise HTTPException(409, str(e)) from e
     except HTTPException:
         raise
     except Exception as e:
@@ -217,7 +264,7 @@ def gmail_reconcile(user_id: int, days: int = Query(7, ge=1, le=90), session: Se
 @api.get("/gmail/status")
 def gmail_status(session: Session = Depends(get_session)):
     """Is the Gmail automation alive? Listener connection, last event, last sync, per inbox."""
-    from app import gmail_listener   # the listener's live status (this process)
+    from app import gmail_listener  # the listener's live status (this process)
     inboxes = []
     for u in session.scalars(select(User).where(User.gmail_account_id.is_not(None)).order_by(User.id)):
         last = session.scalar(select(EmailMessage).where(EmailMessage.user_id == u.id)
@@ -273,12 +320,56 @@ def get_email(email_id: int, session: Session = Depends(get_session)):
     return {**serialize_email(e, _statuses(session, [e])), "body_snippet": e.body_snippet}
 
 
-# ---------- suppliers (built from approved invoices)
+# ---------- suppliers (history from approved invoices + the supplier master)
 
 @api.get("/suppliers")
 def suppliers(session: Session = Depends(get_session)):
-    """Every supplier with approved invoices: what they usually bill, for the reviewer's context."""
-    return list_suppliers(session)
+    """Every supplier with approved invoices: what they usually bill, for the reviewer's context, and its
+    record in the supplier master (PAN, the bank account payments go to)."""
+    masters = {s.gstin: s for s in session.scalars(select(Supplier))}
+    return [{**row, **supplier_master.serialize_master(masters.get(row["gstin"]))}
+            for row in supplier_master.list_suppliers(session)]
+
+
+@api.get("/suppliers/{gstin}")
+def get_supplier(gstin: str, session: Session = Depends(get_session)):
+    """One supplier: its record, its history and what happened to its record (bank details set or confirmed)."""
+    gstin = gstin.upper()
+    sup = supplier_master.get(session, gstin)
+    history = supplier_master.profile(session, gstin)
+    if sup is None and history is None:
+        _404("Supplier")
+    events = [] if sup is None else session.scalars(
+        select(SupplierEvent).where(SupplierEvent.supplier_id == sup.id).order_by(SupplierEvent.id.desc()).limit(100))
+    return {"gstin": gstin, "name": sup.name if sup else history.names[0], **supplier_master.serialize_master(sup),
+            "invoices": history.invoices if history else 0, "highest_total": history.max_total if history else 0,
+            "average_total": history.avg_total if history else 0,
+            "last_invoice_date": history.last_invoice_date if history else None,
+            "events": [supplier_master.serialize_event(e) for e in events]}
+
+
+class BankConfirmation(BaseModel):
+    bank_account: str
+    bank_ifsc: str
+    note: str = Field(description="How the change was confirmed: who you called, on which number from your records")
+    invoice_id: int | None = Field(None, description="The invoice that showed the new details, if any")
+
+
+@api.post("/suppliers/{gstin}/bank")
+def confirm_supplier_bank(gstin: str, body: BankConfirmation, user: User = Depends(current_user),
+                          session: Session = Depends(get_session)):
+    """Record a supplier's bank account after confirming it with the supplier on a known phone number. An
+    invoice held because its bank details differ can be approved once they match the recorded ones."""
+    try:
+        sup = supplier_master.confirm_bank(session, gstin.upper(), body.bank_account, body.bank_ifsc, body.note,
+                                           user.name, body.invoice_id)
+    except LookupError as e:
+        raise HTTPException(404, str(e)) from e
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+    session.commit()
+    log.info("Supplier %s: bank details confirmed by %s", sup.gstin, user.name)
+    return {"gstin": sup.gstin, "name": sup.name, **supplier_master.serialize_master(sup)}
 
 
 # ---------- invoices
@@ -345,8 +436,8 @@ def get_invoice(invoice_id: int, session: Session = Depends(get_session)):
     logs = session.scalars(select(AuditLog).where(AuditLog.invoice_id == invoice_id)
                            .order_by(AuditLog.created_at, AuditLog.id)).all()
     return {**serialize(inv), "extracted": inv.extracted,
-            "audit": [{"stage": l.stage, "actor": l.actor, "message": l.message,
-                       "data": l.data, "at": l.created_at} for l in logs]}
+            "audit": [{"stage": ln.stage, "actor": ln.actor, "message": ln.message,
+                       "data": ln.data, "at": ln.created_at} for ln in logs]}
 
 
 @api.get("/invoices/{invoice_id}/file")
@@ -376,7 +467,7 @@ def correct(invoice_id: int, body: InvoiceCorrection, user: User = Depends(curre
         data = from_stored({**before, **changes, "confidence": 1.0, "low_confidence_fields": []})
     except ValidationError as e:
         problems = "; ".join(f"{'.'.join(map(str, err['loc']))}: {err['msg']}" for err in e.errors())
-        raise HTTPException(422, f"Invalid correction: {problems}")
+        raise HTTPException(422, f"Invalid correction: {problems}") from e
     audit(session, inv.id, "correct", f"Corrected {', '.join(changes)}. {body.note}".strip(),
           {"before": {k: before.get(k) for k in changes}, "after": changes}, actor=user.name)
     evaluate(session, inv, data, actor=user.name, after_correction=True)
@@ -413,10 +504,14 @@ def approve(invoice_id: int, body: Review = Review(), user: User = Depends(curre
     """Approve and write to Excel right away (or as soon as the workbook is closed)."""
     inv = _locked_invoice(session, invoice_id)
     _unchanged(inv, body)
+    if inv.status == Status.NEEDS_REVIEW and (hold := supplier_master.bank_hold(session, inv)):
+        raise HTTPException(409, hold)
     _transition(session, inv, {Status.NEEDS_REVIEW}, Status.APPROVED, user, body.note)
     inv.approved_by = user.name
     inv.approved_at = datetime.now(timezone.utc)
     inv.status_reason = f"Approved by {user.name}"
+    if inv.extracted:
+        supplier_master.record_approved(session, inv, from_stored(inv.extracted), user.name)
     session.commit()
     error = try_export(session, wait=False)   # an export already running writes it within seconds
     session.refresh(inv)
@@ -777,6 +872,23 @@ def report_send(body: SendReport, user: User = Depends(current_user), session: S
     return reports.serialize_run(run)
 
 
+@app.get("/healthz", include_in_schema=False)
+def healthz():
+    """The process is up (for a load balancer or monitor; no key needed)."""
+    return {"status": "ok"}
+
+
+@app.get("/readyz", include_in_schema=False)
+def readyz(session: Session = Depends(get_session)):
+    """The process can serve requests: the database answers. 503 otherwise."""
+    try:
+        session.execute(select(1))
+    except Exception as e:
+        log.warning("Readiness check: database unavailable (%s)", type(e).__name__)
+        return JSONResponse({"status": "unavailable", "database": False}, status_code=503)
+    return {"status": "ok", "database": True}
+
+
 @api.get("/system/status")
 def system_status(session: Session = Depends(get_session)):
     """Is document reading working? The AI account state (this process's workers, and documents in
@@ -799,6 +911,62 @@ def system_status(session: Session = Depends(get_session)):
     }
 
 
+# ---------- GSTR-2B reconciliation (app/gstr2b.py)
+
+@api.post("/gstr2b", status_code=201)
+def upload_gstr2b(file: UploadFile = File(...), user: User = Depends(current_user),
+                  session: Session = Depends(get_session)):
+    """Upload a month's GSTR-2B (JSON from the GST portal). Replaces an earlier upload for the same GSTIN and
+    month. Returns the reconciliation."""
+    limit = settings.max_upload_mb * 1024 * 1024
+    content = file.file.read(limit + 1)
+    if len(content) > limit:
+        raise HTTPException(413, f"File larger than {settings.max_upload_mb} MB")
+    try:
+        ret = gstr2b.store(session, content, file.filename or "gstr2b.json", user.name)
+    except gstr2b.Gstr2bError as e:
+        raise HTTPException(422, str(e)) from e
+    session.commit()
+    return gstr2b.reconcile(session, ret)
+
+
+@api.get("/gstr2b")
+def list_gstr2b(session: Session = Depends(get_session)):
+    """Uploaded GSTR-2B returns, latest month first, each with its reconciliation summary."""
+    returns = session.scalars(select(Gstr2bReturn).order_by(Gstr2bReturn.period.desc(), Gstr2bReturn.gstin))
+    return [{**gstr2b.serialize(r), "summary": gstr2b.reconcile(session, r)["summary"]} for r in returns]
+
+
+@api.get("/gstr2b/{return_id}")
+def get_gstr2b(return_id: int, status: str | None = Query(None, description="matched | mismatch | not_in_books"),
+               session: Session = Depends(get_session)):
+    """The reconciliation of one GSTR-2B: every document it lists, matched with our invoices, and our invoices
+    of that month it doesn't list (ITC at risk)."""
+    ret = session.get(Gstr2bReturn, return_id) or _404("GSTR-2B")
+    result = gstr2b.reconcile(session, ret)
+    if status:
+        result["documents"] = [d for d in result["documents"] if d["status"] == status]
+    return result
+
+
+@api.get("/gstr2b/{return_id}/excel")
+def gstr2b_workbook(return_id: int, session: Session = Depends(get_session)):
+    """The reconciliation as an Excel workbook (summary + every document)."""
+    ret = session.get(Gstr2bReturn, return_id) or _404("GSTR-2B")
+    content = gstr2b.workbook(gstr2b.reconcile(session, ret))
+    name = f"GSTR-2B reconciliation {ret.gstin} {ret.period}.xlsx"
+    return Response(content, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@api.delete("/gstr2b/{return_id}", status_code=204)
+def delete_gstr2b(return_id: int, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    ret = session.get(Gstr2bReturn, return_id) or _404("GSTR-2B")
+    log.info("GSTR-2B %s %s deleted by %s", ret.gstin, ret.period, user.name)
+    session.delete(ret)
+    session.commit()
+
+
 @api.get("/excel/workbooks")
 def excel_workbooks():
     """The workbooks there are: one per financial year (newest first), plus the single workbook from
@@ -817,7 +985,7 @@ def download_excel(year: str | None = Query(None, description="Financial year li
     try:
         path = Path(settings.excel_path) if year == "all" else find_workbook(year)
     except ValueError as e:
-        raise HTTPException(422, str(e))
+        raise HTTPException(422, str(e)) from e
     if path is None or not path.exists():
         raise HTTPException(404, error or (f"No workbook for {year}" if year else "No approved invoices yet"))
     # Read in one go (not streamed from disk): the worker may replace the workbook while it is
@@ -872,6 +1040,54 @@ def stop_followup(follow_up_id: int, user: User = Depends(current_user), session
                               status="reply", detail=f"stopped by {user.name}"[:500]))
     session.commit()
     return followup.serialize(fu, session.get(Invoice, fu.invoice_id))
+
+
+@api.get("/followups/action", response_class=HTMLResponse, include_in_schema=False)
+def followup_action_page(t: str = Query("")):
+    """Opened from a reminder email's button: says what the choice does, with a Confirm button (a POST).
+    Opening the link changes nothing, so mail scanners that open links can't make the choice."""
+    try:
+        text = followup.describe_action(t)
+    except followup.BadLink as e:
+        return HTMLResponse(followup.action_page("This link can't be used", str(e)), status_code=e.status)
+    return HTMLResponse(followup.action_page(followup.EMAIL_ACTIONS[followup.read_action_token(t)[2]], text, t))
+
+
+@api.post("/followups/action", response_class=HTMLResponse, include_in_schema=False)
+def followup_action(t: str = Form(""), session: Session = Depends(get_session)):
+    try:
+        text = followup.apply_action(session, t)
+    except followup.BadLink as e:
+        return HTMLResponse(followup.action_page("This link can't be used", str(e)), status_code=e.status)
+    return HTMLResponse(followup.action_page("Done", text))
+
+
+# ---------- WhatsApp messages received (app/whatsapp.py): what came in and what became of each file
+
+@api.get("/whatsapp/messages")
+def list_whatsapp_messages(user_id: int | None = None, limit: int = Query(50, ge=1, le=200),
+                           session: Session = Depends(get_session)):
+    """Incoming WhatsApp messages, newest first, each attachment with its status: ingested (with the
+    invoice), duplicate, rejected (and why), failed (tried again at next_try_at), gave_up or pending.
+    Senders are masked; message text is never stored."""
+    query = select(WhatsAppMessage).order_by(WhatsAppMessage.id.desc()).limit(limit)
+    if user_id:
+        query = query.where(WhatsAppMessage.user_id == user_id)
+    messages = list(session.scalars(query))
+    media: dict[int, list] = {}
+    for m in session.scalars(select(WhatsAppMedia).where(WhatsAppMedia.message_id.in_([x.id for x in messages]))
+                             .order_by(WhatsAppMedia.position)):
+        media.setdefault(m.message_id, []).append(m)
+    return [whatsapp.serialize_message(m, media.get(m.id, [])) for m in messages]
+
+
+@api.post("/whatsapp/media/{media_id}/retry")
+def retry_whatsapp_media(media_id: int, session: Session = Depends(get_session)):
+    """Try one attachment again at the next retry check (within a minute), e.g. after raising MAX_UPLOAD_MB."""
+    media = whatsapp.retry_now(session, media_id) or _404("WhatsApp attachment")
+    if media.status in ("ingested", "duplicate"):
+        raise HTTPException(409, f"This attachment was already received (invoice {media.invoice_id})")
+    return {"id": media.id, "status": media.status, "next_try_at": media.next_try_at, "attempts": media.attempts}
 
 
 @api.get("/voice/calls")
@@ -950,6 +1166,7 @@ async def composio_webhook(request: Request):
     """New-email events from Composio, signed with COMPOSIO_WEBHOOK_SECRET. Only active with
     GMAIL_DELIVERY=webhook. The event is queued and handled like a websocket event."""
     from composio import exceptions as composio_errors
+
     from app import gmail_listener
     if not (gmail_listener.webhook_mode() and settings.composio_webhook_secret):
         raise HTTPException(404, "Webhook delivery is not enabled (GMAIL_DELIVERY=webhook + COMPOSIO_WEBHOOK_SECRET)")

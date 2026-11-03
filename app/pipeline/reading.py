@@ -16,7 +16,7 @@ from pathlib import Path
 from app.config import settings
 from app.models import Invoice
 from app.pipeline import einvoice, extract
-from app.pipeline.checks import Check, FAIL, PASS, WARN
+from app.pipeline.checks import FAIL, PASS, WARN, Check
 from app.pipeline.journal import JOURNAL
 from app.pipeline.validate import normalize_extracted, validate
 from app.schemas import ExtractedInvoice
@@ -179,7 +179,7 @@ def _differences(a: ExtractedInvoice, b: ExtractedInvoice) -> list[str]:
               "igst", "round_off", "grand_total"):
         if getattr(a, f) != getattr(b, f):
             out.append(f"{f.replace('_', ' ')} {getattr(a, f)!r} -> {getattr(b, f)!r}")
-    if [l.model_dump() for l in a.lines] != [l.model_dump() for l in b.lines]:
+    if [ln.model_dump() for ln in a.lines] != [ln.model_dump() for ln in b.lines]:
         out.append("line items")
     if [r.model_dump() for r in a.hsn_summary] != [r.model_dump() for r in b.hsn_summary]:
         out.append("HSN summary")

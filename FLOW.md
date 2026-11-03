@@ -41,7 +41,9 @@ The last section, **"You are here"**, shows where current work sits on these pat
 2. Uvicorn starts the app and runs **`api.lifespan`**:
    1. `logs.setup_logging()`
    2. raises the thread limit for blocking endpoints to `API_THREADS`
-   3. `Base.metadata.create_all(engine)`, which creates any missing tables (never alters them)
+   3. `security.warn_if_open()` (a warning when `API_KEY` is empty), then `migrate.upgrade_on_start()`:
+      Alembic upgrade to the latest migration under an advisory lock (a `create_all`-made database is
+      stamped at the baseline first)
    4. `Background().start()`, which spawns daemon threads:
       - `worker`, `worker-2` … `worker-N` → `worker.run(stop)` (N = `WORKER_CONCURRENCY`)
       - `gmail-listener` → `gmail_listener.run(stop)` if `RUN_GMAIL_LISTENER` and `COMPOSIO_API_KEY` are
@@ -379,7 +381,43 @@ The Python locks are per process. That is one reason the API must run as one pro
 
 ---
 
-## You are here (2026-10-29, email follow-ups added)
+## You are here (2026-11-02, WhatsApp receiving and email reminder buttons)
+
+### WhatsApp log and retries, email one-click choices (D-106, D-107; 462 tests pass)
+
+- WhatsApp webhook (§3e): after mapping the sender (`users.whatsapp_number` first, then `WHATSAPP_SENDERS`) it
+  calls `whatsapp.record_message`. A MessageSid seen before → empty TwiML, nothing else. Each attachment then goes
+  `process_media` → `handle_media` (download, check, ingest) → `save_media_result` → a reply when follow-ups are
+  on. Failed ones are picked up by the `whatsapp-retry` background thread (`retry_due`, every minute).
+- A WhatsApp text `STATUS` / `HELP` → `followup._handle_text` → `status_text` / `HELP_FULL`.
+- Reminder emails (§3f) carry three signed links. `GET /api/v1/followups/action` → `describe_action` (a page with
+  Confirm), `POST` → `apply_action` (pause, snooze or stop; event `email` / `in` / `reply`).
+- Migration 0004 adds `users.whatsapp_number`, `whatsapp_messages`, `whatsapp_media`.
+
+## Earlier: 2026-11-02, supplier master and GSTR-2B
+
+### Supplier master and bank-detail hold (D-104; 433 tests pass)
+
+- `evaluate.evaluate` now also runs `supplier.check_bank` (with `check_supplier`), and when the decision is
+  APPROVED it calls `supplier.record_approved` (creates the supplier, records its first bank account).
+- `api.approve` asks `supplier.bank_hold` first (409 while the account differs) and calls `record_approved` after.
+- New route `POST /api/v1/suppliers/{gstin}/bank` → `supplier.confirm_bank`.
+- GSTR-2B (D-105): `POST /api/v1/gstr2b` → `gstr2b.store` (parse, check GSTIN, replace the month);
+  every read (`GET /gstr2b`, `/gstr2b/{id}`, `/excel`) → `gstr2b.reconcile`, which matches the stored documents
+  with the invoices at that moment. Nothing runs in the background. 442 tests pass.
+
+## Earlier: 2026-10-30, production hardening
+
+### Clean-up, migrations, API key (D-101…D-103; 425 tests pass, ruff clean)
+
+- Every request first passes `security.ApiKeyMiddleware` (when `API_KEY` is set), before any route. Webhooks,
+  `/healthz`, `/readyz` and the Gmail callback are let through.
+- Start-up (§1, step 3) now migrates the database instead of `create_all`; the worker and the Gmail listener do
+  the same when run on their own.
+- `legacy_v1/`, `ngrok.exe` (untracked) and the stray `0` are gone; planning notes are in `docs/planning/`.
+- Not on the path yet: real login and roles, branches, PO/GRN (the next phase), and CI has not run on GitHub yet.
+
+## Earlier: 2026-10-29, email follow-ups added
 
 ### Email follow-ups (D-100; 417 tests pass)
 
