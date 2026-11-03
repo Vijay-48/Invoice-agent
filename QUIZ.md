@@ -442,3 +442,9 @@ text cells, line items, control characters and negative numbers.
 52. (2026-11-02) Why does opening a reminder email's "Stop these reminders" link not stop anything, and what would go
     wrong at a company that uses Outlook Safe Links if it did? Why is that route open without the API key, and
     what stops someone from stopping another person's reminders? [D-107]
+53. (2026-11-03) `SECOND_APPROVAL_ABOVE=500000`. Priya approves a ₹6 lakh invoice, Ravi corrects its PO number,
+    then Ravi approves. What is its status, and why? With `MAKER_CHECKER=true`, what changes? [D-108]
+54. (2026-11-03) A consultant (company PAN) bills ₹40,000 + GST in May and ₹20,000 + GST in August. What does the
+    `tds` check say on each, which one goes to review, and why must the May invoice be looked at again? [D-109]
+55. (2026-11-03) A micro supplier with agreed 60-day terms sends an invoice dated 1 October. When is it due, why
+    not 30 November, and what does it cost the company to pay on 30 November? [D-110]

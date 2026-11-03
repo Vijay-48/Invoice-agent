@@ -292,6 +292,8 @@ One workbook per financial year (April–March, by invoice date): `output/invoic
   CGST/SGST/IGST, round off, total, approved by (`auto` or the user), source, sender, user, file.
 - **Line Items**: one row per item, linked by Invoice ID.
 
+The Invoices sheet ends with Due Date, TDS Section, TDS and Net Payable (total less TDS).
+
 If the file is open in Excel when an invoice is approved, it can't be saved: the
 invoice stays `APPROVED` and is written as soon as the file is closed (the worker
 retries every few seconds). Only that year's invoices wait; other years are written. Rows are never written twice.
@@ -346,6 +348,31 @@ invoices, plus the approved invoices of that month **missing from GSTR-2B**, and
 invoices missing from 2B, tax filed lower than on the invoice, and credit the portal marks as not available.
 `GET /api/v1/gstr2b/{id}/excel` gives the same as a workbook for the accountant. Matches are worked out each time
 you look, so invoices approved later and suppliers filing late are picked up without uploading again.
+
+## Approvals, tax and payables
+
+**Approval matrix.** Give each person a limit (empty = any amount, 0 = can't approve):
+
+    curl -X PUT localhost:8000/api/v1/users/2/approval-limit -H "X-User-Id: 1" -H "Content-Type: application/json" -d "{\"limit\": 200000}"
+
+`SECOND_APPROVAL_ABOVE=500000` makes larger invoices need two different approvers (the first approval shows as
+"1 of 2"). `MAKER_CHECKER=true` stops the person who uploaded, sent or corrected an invoice from approving it.
+
+**Tax.** Each invoice gets a `tds` check from its SAC codes (194C / 194J / 194I / 194H, rate by the supplier's PAN,
+year thresholds), and warnings for **reverse charge** (GTA, advocates, security, residential rent with no GST
+charged) and **blocked input tax credit** (cars, food, health and beauty, construction). The rules are in
+`app/pipeline/tax.py` for your CA to confirm; `TDS_CHECKS=false` turns TDS off.
+
+**Payables.** Due date = invoice date + the supplier's terms (default `PAYMENT_DAYS=30`). Set terms and MSME status:
+
+    curl -X PUT localhost:8000/api/v1/suppliers/36AAACS1234A1Z3/terms -H "X-User-Id: 1" -H "Content-Type: application/json" -d "{\"payment_terms_days\": 45, \"msme_category\": \"micro\", \"udyam_number\": \"UDYAM-TS-02-0012345\"}"
+
+Micro and small suppliers are due within 45 days at most (15 with no agreed terms). After paying in the bank:
+
+    curl -X POST localhost:8000/api/v1/invoices/12/payment -H "X-User-Id: 1" -H "Content-Type: application/json" -d "{\"paid_on\": \"2026-11-03\", \"reference\": \"UTR123456\"}"
+
+`GET /api/v1/payables/ageing` shows what is owed per supplier by days overdue (net of TDS) and MSME invoices past
+due; `GET /api/v1/payables/due?days=7` is the list for the next payment run.
 
 ## Production checklist
 
@@ -443,6 +470,7 @@ against a fresh PostgreSQL 17.
     app/api.py               REST API (/api/v1), /healthz, /readyz
     app/security.py          API key check (API_KEY)
     app/gstr2b.py            GSTR-2B upload and reconciliation with approved invoices
+    app/payables.py          due dates (supplier terms, MSME), payments marked, AP ageing
     app/migrate.py           applies the database migrations on start
     migrations/              Alembic migrations (0001 = baseline of every table)
     app/ingest.py            one entry point for every channel (hash, store, queue)
@@ -465,6 +493,7 @@ against a fresh PostgreSQL 17.
     app/pipeline/validate.py GSTIN checksum, GST type, arithmetic, dates, duplicates
     app/pipeline/decide.py   auto-approve / review / duplicate / not an invoice
     app/pipeline/supplier.py supplier history and master: bank details check, hold and confirmation
+    app/pipeline/tax.py      TDS section and amount, reverse charge, blocked input tax credit (rule tables)
     app/pipeline/evaluate.py stores values, runs checks, sets status (AI and corrections)
     app/excel.py             workbook writer
     app/assistant.py         AI chat (Agno tools in app/assistant_tools.py), streamed answers

@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -34,6 +34,8 @@ class User(Base):
     # WhatsApp number (+919876543210) this user sends invoices from and is reminded at; WHATSAPP_SENDERS
     # in .env still works too (D-106)
     whatsapp_number: Mapped[str | None] = mapped_column(String(20), unique=True)
+    # Highest invoice total this user may approve; none = any amount, 0 = may not approve (D-108)
+    approval_limit: Mapped[float | None] = mapped_column(Numeric(14, 2))
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -74,6 +76,17 @@ class Invoice(Base):
     approved_by: Mapped[str | None] = mapped_column(String(100))   # "auto" or a user's name
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     exported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # TDS the company deducts when paying (app/pipeline/tax.py, D-109); a suggestion until the CA confirms
+    tds_section: Mapped[str | None] = mapped_column(String(10))      # 194C | 194J | 194I | 194H
+    tds_base: Mapped[float | None] = mapped_column(Numeric(14, 2))   # taxable value of the lines it covers
+    tds_rate: Mapped[float | None] = mapped_column(Numeric(5, 2))    # percent; none = below the threshold
+    tds_amount: Mapped[float | None] = mapped_column(Numeric(14, 2))
+    # Payables (app/payables.py, D-110)
+    due_date: Mapped[date | None] = mapped_column(Date, index=True)
+    paid_on: Mapped[date | None] = mapped_column(Date)
+    paid_reference: Mapped[str | None] = mapped_column(String(100))  # UTR / cheque number
+    paid_by: Mapped[str | None] = mapped_column(String(100))
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -297,6 +310,10 @@ class Supplier(Base):
     bank_set_by: Mapped[str | None] = mapped_column(String(100))          # "auto" (first invoice) or a user
     bank_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     bank_source_invoice_id: Mapped[int | None] = mapped_column(ForeignKey("invoices.id"))
+    # Payment terms (D-110): days after the invoice date; none = PAYMENT_DAYS. MSME: micro | small | medium
+    payment_terms_days: Mapped[int | None] = mapped_column(Integer)
+    msme_category: Mapped[str | None] = mapped_column(String(10))
+    udyam_number: Mapped[str | None] = mapped_column(String(19))     # UDYAM-XX-00-0000000
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -355,6 +372,20 @@ class Gstr2bDocument(Base):
     itc_reason: Mapped[str | None] = mapped_column(String(100))
     reverse_charge: Mapped[bool] = mapped_column(default=False)
     supplier_filed_on: Mapped[str | None] = mapped_column(String(10))
+
+
+class Approval(Base):
+    """One person's approval of an invoice (D-108). Invoices above SECOND_APPROVAL_ABOVE need two, by
+    different people. Cleared when the invoice is corrected or read again: the values approved changed."""
+    __tablename__ = "approvals"
+    __table_args__ = (UniqueConstraint("invoice_id", "user_id"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    invoice_id: Mapped[int] = mapped_column(ForeignKey("invoices.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    user_name: Mapped[str] = mapped_column(String(100))
+    amount: Mapped[float | None] = mapped_column(Numeric(14, 2))     # the total when approved
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 def audit(session, invoice_id: int, stage: str, message: str, data: dict | None = None, actor="system"):

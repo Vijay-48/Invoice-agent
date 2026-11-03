@@ -381,7 +381,20 @@ The Python locks are per process. That is one reason the API must run as one pro
 
 ---
 
-## You are here (2026-11-02, WhatsApp receiving and email reminder buttons)
+## You are here (2026-11-03, approval matrix, tax treatment, payables)
+
+### Finishing the partly built AP stages (D-108 to D-110; 475 tests pass)
+
+- Checks (§4): `evaluate` adds `tax.check_tax` (TDS section and amount on the invoice, reverse charge, blocked
+  credit) after the supplier checks, and sets `inv.due_date` from `payables.due_date_for`.
+- Approve (§5): `approve` → `_may_approve` (the user's `approval_limit`, then `MAKER_CHECKER`) → an `approvals`
+  row → `APPROVED` once `approvals_needed` people have approved, else stays `NEEDS_REVIEW` ("1 of 2").
+  `correct` and `reprocess` clear the approvals.
+- After approval: `POST /invoices/{id}/payment` marks it paid; `GET /payables/ageing` and `/payables/due` read
+  the unpaid ones (`payables.owed`). `PUT /suppliers/{gstin}/terms` changes terms and moves due dates.
+- Migration 0005: `approvals`, `users.approval_limit`, `invoices.tds_*`, `due_date`, `paid_*`, supplier terms.
+
+## Earlier: 2026-11-02, WhatsApp receiving and email reminder buttons
 
 ### WhatsApp log and retries, email one-click choices (D-106, D-107; 462 tests pass)
 

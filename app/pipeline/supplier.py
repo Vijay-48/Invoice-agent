@@ -224,9 +224,11 @@ def confirm_bank(session: Session, gstin: str, account: str, ifsc: str, note: st
 def serialize_master(sup: Supplier | None) -> dict:
     if sup is None:
         return {"in_master": False, "pan": None, "bank_account": None, "bank_ifsc": None, "bank_set_by": None,
-                "bank_set_at": None}
+                "bank_set_at": None, "payment_terms_days": None, "msme_category": None, "udyam_number": None}
     return {"in_master": True, "pan": sup.pan, "bank_account": sup.bank_account, "bank_ifsc": sup.bank_ifsc,
-            "bank_set_by": sup.bank_set_by, "bank_set_at": sup.bank_set_at}
+            "bank_set_by": sup.bank_set_by, "bank_set_at": sup.bank_set_at,
+            "payment_terms_days": sup.payment_terms_days, "msme_category": sup.msme_category,
+            "udyam_number": sup.udyam_number}
 
 
 def serialize_event(e: SupplierEvent) -> dict:

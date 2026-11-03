@@ -1213,3 +1213,67 @@ Refines D-100 ("emails take no replies").
 - **Where**: `app/followup.py` (`action_token`, `read_action_token`, `action_links`, `describe_action`,
   `apply_action`, `action_page`, `compose_email`), `app/api.py`, `app/security.py`, `app/config.py`,
   `tests/test_followup.py`.
+
+## 19. Approval matrix, tax treatment and payables (2026-11-03)
+
+The partly built stages of the plan in `docs/planning/` (stages 4 to 8 of its invoice-to-close table), brought to a
+working first version. Still no login (approvals are by `X-User-Id`), no PO/GRN, Excel not Tally.
+
+### D-108 Approval matrix: limits per person, two approvers above an amount, maker-checker
+
+Refines D-02 (auto-approve up to `AUTO_APPROVE_LIMIT`), which stays as it is for invoices that pass every check.
+- **Each user's limit**: `users.approval_limit` (`PUT /api/v1/users/{id}/approval-limit`). Empty = any amount (as
+  before, so nothing changes until limits are set); 0 = may not approve. A total above the limit gets 403 with
+  the reason.
+- **Two approvers**: above `SECOND_APPROVAL_ABOVE` (0 = off) the first approval is recorded in `approvals` and the
+  invoice stays `NEEDS_REVIEW` with "Approved by X (1 of 2)"; a different person's approval completes it.
+  `approved_by` then names both. Each approver's own limit must cover the total: the simple, strict reading;
+  "the last approver's limit covers it" would let a junior give the first approval and is a later choice.
+- **Maker-checker** (`MAKER_CHECKER=true`): the person who uploaded or sent the invoice on WhatsApp, or corrected
+  it, can't approve it. A Gmail invoice's inbox owner is not its maker (the supplier sent it). The correction is
+  matched by user id, now kept in the `correct` audit entry, not by name.
+- **Approvals are cleared** when the invoice is corrected or read again: they were given for other values.
+- **Not done**: roles; who may set limits (anyone, until there is a login); approval by cost centre or branch
+  (no cost centres yet); an `APPROVAL_PENDING` status (the reason text carries it, so no screen or report changes).
+- **Where**: `app/api.py` (`_may_approve`, `approvals_needed`, `approve`), `app/models.py` (`Approval`,
+  `User.approval_limit`), `app/config.py`, `tests/test_ap_controls.py`.
+
+### D-109 Tax treatment from the HSN/SAC codes: TDS, reverse charge, blocked credit
+
+- **Plain rules, no AI**: `app/pipeline/tax.py` holds the tables (`TDS_RULES`, `RCM_RULES`, `BLOCKED_ITC`) and a
+  `RULES_VERSION` stored in each decision's audit. **They are a starting point for the CA to confirm**: rates and
+  thresholds as understood on 2026-11-03 (Finance Act 2025).
+- **TDS** (`tds` check): the section of the lines' SAC codes (194C contract work, 194J professional/technical,
+  194I rent, 194H commission), the rate by the PAN in the supplier's GSTIN (194C: 1% individual/HUF, 2% others;
+  20% when there is no PAN), on the taxable value (GST excluded). Thresholds: one invoice, or the supplier's
+  approved invoices of the financial year in the same section. The section, base, rate and amount are stored on
+  the invoice (`tds_*`), shown in the API and Excel, and taken off the net payable.
+  Information (PASS) normally, so it doesn't send every service invoice to review; WARN when a person must act:
+  no PAN, or this invoice takes the year over the threshold (TDS is then due on the earlier invoices too).
+- **Reverse charge** (`rcm`, WARN): a line for GTA transport, an advocate's legal services, security services or
+  renting a residential dwelling with **no GST charged**: the company pays that GST itself.
+- **Blocked credit** (`itc_blocked`, WARN): GST on motor cars and motorcycles, food and beverages, health and
+  beauty services, construction work (section 17(5)): booked as cost unless an exception applies.
+- **Not done**: 194Q (goods; needs the company's turnover), lower-deduction certificates, 195 (non-residents),
+  206AB, the 194J 2% technical-services rate (mentioned in the message), TDS returns and challans.
+- **Where**: `app/pipeline/tax.py`, `app/pipeline/evaluate.py`, `tests/test_ap_controls.py`.
+
+### D-110 Payables: due dates, MSME terms, payments marked, AP ageing
+
+- **Due date** = invoice date + the supplier's `payment_terms_days`, else `PAYMENT_DAYS` (30). Set when the invoice
+  is checked, and again for the supplier's unpaid invoices when its terms change. Credit notes and journals have
+  none. Migration 0005 gives already approved invoices invoice date + 30.
+- **MSME** (`PUT /api/v1/suppliers/{gstin}/terms`: terms, `micro|small|medium`, Udyam number): a micro or small
+  supplier must be paid within the agreed terms but at most `MSME_PAYMENT_DAYS` (45), or `MSME_DEFAULT_DAYS` (15)
+  when nothing is agreed (MSMED Act section 15). Late payment costs interest and the income tax deduction that
+  year (43B(h)). The invoice date stands in for the acceptance date: the earlier, safer one.
+- **Paid**: `POST /api/v1/invoices/{id}/payment` (date, UTR or cheque number) records a payment made in the bank;
+  `DELETE` undoes a mistake. Only approved invoices; not in the future; audited. The app never pays.
+- **Ageing**: `GET /api/v1/payables/ageing` per supplier: not due, 1-30, 31-60, 61-90, over 90 days past due, and
+  credit notes, net of TDS, plus **MSME invoices past their due date**. `GET /api/v1/payables/due?days=7` is the
+  payment run's list. Excel gets Due Date, TDS Section, TDS and Net Payable columns, added at the end so existing
+  workbooks stay aligned.
+- **Not done**: part payments; payment batches and approval of payments; bank files; the due date printed on the
+  invoice (needs a new extraction field and the golden set re-run); reminders before MSME due dates.
+- **Where**: `app/payables.py`, `app/api.py`, `app/excel.py`, `app/models.py`,
+  `migrations/versions/*0005*`, `tests/test_ap_controls.py`.
