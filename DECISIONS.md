@@ -1277,3 +1277,100 @@ Refines D-02 (auto-approve up to `AUTO_APPROVE_LIMIT`), which stays as it is for
   invoice (needs a new extraction field and the golden set re-run); reminders before MSME due dates.
 - **Where**: `app/payables.py`, `app/api.py`, `app/excel.py`, `app/models.py`,
   `migrations/versions/*0005*`, `tests/test_ap_controls.py`.
+
+## 20. Branches, purchase orders, GRNs and three-way matching (2026-11-03)
+
+Stage 3 of the plan in `docs/planning/` (supplier / PO / GRN matching), first version. Sign-in is still later
+(D-108's note applies: names, not verified people). One company; its GSTINs per state sit on the branches.
+
+### D-111 Branches
+
+- `branches`: code, name, city, GST state code, the GSTIN used there, address, active. `POST/GET/PATCH
+  /api/v1/branches`; `PUT /api/v1/users/{id}/branch` (where a person works: their GRNs default to it).
+- An invoice's branch: its PO's branch, else the one active branch whose GSTIN is the invoice's buyer GSTIN
+  (several branches on one GSTIN: the PO must say). Shown as `branch_id` on the invoice.
+- **Instead of** an `organizations` table and a separate GST-registrations table: one company for now. Branch
+  GSTINs with the company's PAN already count as the company's in the buyer check (`COMPANY_GSTIN`), so no change there.
+
+### D-112 Purchase orders, goods receipts (GRN) and matching
+
+- **PO** (`POST /api/v1/purchase-orders`): number (unique, compared like invoice numbers), supplier and GSTIN,
+  date, goods or services, branch, lines (description, HSN/SAC, quantity, unit price before tax, GST rate,
+  delivered-to branch). Status OPEN → PARTIALLY_RECEIVED → RECEIVED from the confirmed GRNs; `close` (short
+  close: nothing more will come) and `cancel` (only if nothing was received).
+- **GRN** (`POST /api/v1/purchase-orders/{id}/grns`): what a branch received per PO line, split into
+  **accepted** and **rejected (with a reason)**; for services, the work confirmed done. A DRAFT counts for nothing;
+  `confirm` (or `"confirm": true` at once) makes it count. Accepting more than ordered (beyond
+  `QUANTITY_TOLERANCE_PCT`) is refused, and checked again at confirm (another GRN may have been confirmed since).
+  Only a draft can be cancelled: a confirmed GRN may already have let invoices through.
+- **Quantities are added up, never stored on the PO**: accepted and rejected from confirmed GRN lines, billed from
+  `invoice_po_lines`. `GET /api/v1/purchase-orders/{id}` shows per line: ordered, accepted, rejected, billed,
+  to receive, to bill.
+- **Matching** (`po` check, `PO_MATCHING=true`): the invoice's PO number finds the PO. Each invoice line goes to
+  the PO lines with the same HSN/SAC heading (first 4 digits) at the nearest price, **spread over them** when one
+  item was ordered for several branches (the supplier bills "50 laptops" on one line). Then:
+  price above the PO by more than `PRICE_TOLERANCE_PCT` (1%) → review (lower is fine); quantity above what is
+  accepted and not billed → review, with "nothing received yet" when there is no confirmed GRN. Unknown PO →
+  review; another supplier's PO or a cancelled one → FAIL. `match_status`: matched | partial | unmatched | no_po.
+  `PO_REQUIRED=true`: no PO number → review.
+- **Billed counts invoices in review too**: two invoices for the same goods can't both pass while the first waits.
+  An advisory lock per PO keeps two at a time from both seeing the quantity free.
+- **Checked again by themselves**: confirming a GRN, or entering a PO, re-runs the checks on the invoices in
+  review that quote that PO (`evaluate.recheck`); a clean one is approved and goes to Excel, exactly as if it had
+  arrived after the goods. A corrected invoice still waits for a person (D-02).
+- **Off by default** (`PO_MATCHING=false`): with no POs entered every invoice would wait.
+- **Not done**: who may create or confirm a GRN (needs sign-in); GRN on WhatsApp with a Confirm button; PO upload
+  from Excel or from the PO PDF; matching by item code instead of HSN and price; credit notes against GRN
+  rejections; PO approval; branch and PO columns in Excel.
+- **Where**: `app/procurement.py`, `app/pipeline/matching.py`, `app/pipeline/evaluate.py` (`recheck`), `app/api.py`,
+  `app/models.py`, `migrations/versions/*0006*`, `tests/test_po_matching.py` (the planning scenarios: invoice before
+  delivery, partial delivery, damaged goods, billed twice, 50 laptops for five branches).
+
+### D-113 Goods receipts on WhatsApp: draft, then an explicit CONFIRM
+
+Refines D-112 (GRNs) and D-98 (fixed words on WhatsApp, no AI reading free text).
+- **What**: a branch person sends `GRN` (open POs of their branch), `GRN <PO>` (its lines and what is still to
+  come), or `GRN <PO>` followed by one line per PO line: `1 10` (received) or `1 10 2 bent` (2 of them rejected,
+  and why); `challan <number>` optionally. The answer is a **draft** GRN, summarised back. `CONFIRM <n>` makes it
+  count, and the invoices waiting for those goods are checked again (same `procurement.after_po_change` as the
+  API); `CANCEL <n>` discards it. Without a number, CONFIRM and CANCEL act on the sender's only draft.
+- **Draft, then confirm**: the summary lets the person see what was understood before it counts. Only the words
+  GRN / CONFIRM / CANCEL are taken: "ok", a thumbs-up or any other text never confirms anything.
+- **Who**: the sender is the user their number maps to (Twilio's signature checked, D-97/D-106). A draft can be
+  confirmed or cancelled only by the person who sent it (`goods_receipts.created_by_id`, migration 0007; also
+  `source` = whatsapp). Their branch (`users.branch_id`) is the GRN's branch, else the PO's.
+- **Replies are sent even with follow-ups off**: the person asked, and the reply is inside the 24-hour window
+  they just opened. Off by default: `WHATSAPP_GRN=true`. Other messages are handled as before.
+- **Not done**: photos of the goods or the challan attached to a GRN (a photo is still read as an invoice); the
+  received date is today (no "received yesterday"); a reminder to the branch when goods are due (follow-up
+  ladder); languages other than English.
+- **Where**: `app/grn_chat.py`, `app/whatsapp.py` (routing), `app/procurement.py`, `tests/test_grn_chat.py`.
+
+## 21. WhatsApp reminders through Composio, switchable (2026-11-04)
+
+### D-114 Reminder WhatsApp messages can go out through Composio's WhatsApp; everything else stays on Twilio
+
+- **What**: `FOLLOWUP_WHATSAPP_VIA=composio` sends the follow-up ladder's WhatsApp steps through Composio's
+  WhatsApp toolkit (Meta's Cloud API, `WHATSAPP_SEND_MESSAGE` / `WHATSAPP_SEND_TEMPLATE_MESSAGE`, toolkit pinned at
+  `COMPOSIO_WHATSAPP_VERSION`). `twilio` (the default) changes nothing. Incoming invoices, replies (1 / 2 / STOP,
+  STATUS, HELP), file receipts and GRN messages stay on Twilio: Composio's toolkit has no incoming-message
+  trigger (only a polled delivery-status one), so it can't receive.
+- **Plug and play**: one setting and four values (connected account, the Composio user id it was connected under,
+  Meta's `phone_number_id`, optionally an approved template). `python -m scripts.composio_whatsapp` lists the
+  account's numbers and approved templates, and `--send +91...` sends one test reminder.
+- **The 24-hour window is unknown** for the Composio number (replies go to it, and we don't receive there). So
+  with `COMPOSIO_WHATSAPP_TEMPLATE` set every reminder uses the template (body `{{1}}` = the reminder text on one
+  line), which always reaches the person; without it, plain text, which Meta delivers only if the person wrote to
+  that number in the last 24 hours. A plain message outside the window may still be accepted by the API and
+  fail later: the event says "sent" while the person never got it. Use a template in production.
+- **The message doesn't ask for 1 / 2 / STOP** on this route: replies to that number are never read, so it says
+  so. Replies to the Twilio number keep working.
+- **Same safety as Twilio**: dry run sends nothing; daily cap, sending hours and the ladder are unchanged; a
+  failure's reason has numbers removed and an exception gives only its class.
+- **Field names checked against the live toolkit** (2026-11-04): `phone_number_id`, `to_number` (digits, no +),
+  `text`; template: `template_name`, `language_code`, `components`.
+- **Not done**: buttons (`WHATSAPP_SEND_INTERACTIVE_BUTTONS`) and replies on the Composio number (needs a Meta
+  webhook of our own); delivery status from Composio's polled trigger; replies to people (STATUS, receipts) via
+  Composio.
+- **Where**: `app/outbound.py` (`send_whatsapp_composio`), `app/followup.py` (`prepare`, `_send`, `compose`),
+  `app/config.py`, `scripts/composio_whatsapp.py`, `tests/test_composio_whatsapp.py`.

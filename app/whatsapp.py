@@ -522,6 +522,11 @@ def incoming_message(background: BackgroundTasks, From: str = Form(...), Message
     if logged is None:
         log.info("WhatsApp message %s was already received (Twilio sent it again); not handled twice", MessageSid)
         return Response(content=EMPTY_TWIML, media_type="application/xml")
+    if user_id is not None and not media and settings.whatsapp_grn:
+        from app import grn_chat  # here, not at the top: it imports modules that import this one
+        if grn_chat.is_grn_message(Body):
+            background.add_task(grn_chat.on_message, user_id, From, Body)
+            return Response(content=EMPTY_TWIML, media_type="application/xml")
     if user_id is not None and settings.followup_enabled:
         # Remembers when they last wrote (WhatsApp's 24-hour window) and answers 1 / 2 / STOP
         from app import followup  # here, not at the top: followup imports this module

@@ -381,7 +381,37 @@ The Python locks are per process. That is one reason the API must run as one pro
 
 ---
 
-## You are here (2026-11-03, approval matrix, tax treatment, payables)
+## You are here (2026-11-04, WhatsApp reminders through Composio)
+
+### Switchable sender for reminders (D-114)
+
+- Follow-ups (§3f): `prepare` → for a WhatsApp step with `FOLLOWUP_WHATSAPP_VIA=composio`: `compose(replies=False)`,
+  template if `COMPOSIO_WHATSAPP_TEMPLATE` (no window check) → `_send` → `outbound.send_whatsapp_composio` →
+  Composio `WHATSAPP_SEND_MESSAGE` / `WHATSAPP_SEND_TEMPLATE_MESSAGE`. Everything else unchanged (Twilio).
+
+## Earlier: 2026-11-03, GRN on WhatsApp
+
+### Branch staff report goods received on WhatsApp (D-113; 494 tests pass)
+
+- WhatsApp webhook (§3e): a text from a known sender starting with GRN / CONFIRM / CANCEL, with
+  `WHATSAPP_GRN=true`, goes to `grn_chat.on_message` (background) instead of the follow-up replies →
+  `grn_chat.answer` → `procurement.create_grn` (draft, `source` whatsapp) or `confirm_grn` →
+  `procurement.after_po_change` (waiting invoices checked again) → `followup.reply`.
+- Migration 0007: `goods_receipts.created_by_id`, `source`.
+
+## Earlier: 2026-11-03, branches, purchase orders, GRNs, matching
+
+### Three-way matching (D-111, D-112; 486 tests pass)
+
+- Checks (§4): `evaluate` adds `matching.check_po` after the tax checks: invoice branch from the buyer GSTIN, then
+  (with `PO_MATCHING`) PO by number → lines spread over PO lines → price and quantity against
+  `procurement.line_totals` (confirmed GRNs, billed invoices) → `invoice_po_lines` rows and `match_status`.
+- `POST /purchase-orders` → `procurement.create_po`; `POST /purchase-orders/{id}/grns` → `create_grn` (draft) →
+  `confirm_grn`. Both then `recheck_waiting` → `evaluate.recheck` on invoices in review quoting that PO.
+- Migration 0006: `branches`, `purchase_orders`, `po_lines`, `goods_receipts`, `grn_lines`, `invoice_po_lines`,
+  `users.branch_id`, `invoices.po_id` / `branch_id` / `match_status`.
+
+## Earlier: 2026-11-03, approval matrix, tax treatment, payables
 
 ### Finishing the partly built AP stages (D-108 to D-110; 475 tests pass)
 

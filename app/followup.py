@@ -73,6 +73,7 @@ CHANNELS = ("whatsapp", "email", "voice")
 NO_ADDRESS = {"whatsapp": "no number in WHATSAPP_SENDERS", "voice": "no number in WHATSAPP_SENDERS",
               "email": "email address not in FOLLOWUP_EMAIL_TO"}
 PAUSING_OUTCOMES = ("handling", "remind_later")
+NO_REPLIES = "Replies to this number aren't read."
 HELP_WITH_WAITING = "Reply 1 if you are handling it, 2 to be reminded later, or STOP to end these reminders."
 HELP_NOTHING = "Send me an invoice as a PDF or a photo and I will process it. Send STATUS to see your invoices."
 HELP_FULL = ("Send me an invoice as a PDF or a photo (several in one message is fine) and I will process it.\n"
@@ -329,12 +330,13 @@ def _sections(items: list[tuple[FollowUp, Invoice]]) -> list[tuple[str, str, lis
     return out
 
 
-def compose(items: list[tuple[FollowUp, Invoice]]) -> str:
-    """One WhatsApp message for everything due for one person."""
+def compose(items: list[tuple[FollowUp, Invoice]], replies: bool = True) -> str:
+    """One WhatsApp message for everything due for one person. replies=False: sent from a number whose
+    replies we don't receive (FOLLOWUP_WHATSAPP_VIA=composio), so it doesn't ask for 1 / 2 / STOP."""
     sections = _sections(items)
     parts = [heading + "\n" + "\n".join(lines) for _, heading, lines in sections]
     if any(kind == "review" for kind, _, _ in sections):
-        parts.append("Open the invoice app to review them. " + HELP_WITH_WAITING)
+        parts.append("Open the invoice app to review them. " + (HELP_WITH_WAITING if replies else NO_REPLIES))
     return "\n\n".join(parts)
 
 
@@ -463,9 +465,14 @@ def prepare(session: Session, ids: list[int], now: datetime) -> list[Group]:
                 group.subject, group.text = compose_email(session.get(User, user_id).name, items, user_id)
                 group.sender = sender = sender or _email_sender(session)
         elif channel == "whatsapp":
-            group.text = compose(items)
+            via_composio = settings.followup_whatsapp_via == "composio"
+            group.text = compose(items, replies=not via_composio)
             if _count_today(session, user_id, now, "whatsapp") >= settings.followup_max_per_day:
                 group.skip = "limit"
+            elif via_composio:
+                # Twilio receives, so the 24-hour window of the Composio number is unknown: the template
+                # always reaches the person; plain text only if they wrote to that number lately
+                group.template = bool(settings.composio_whatsapp_template)
             elif not _session_open(session, group.address, now):
                 if settings.twilio_whatsapp_template_sid:
                     group.template = True
@@ -500,6 +507,8 @@ def _email_sender(session: Session) -> User | None:
 def _send(group: Group) -> outbound.Result:
     """The only place that talks to Twilio or Gmail; called with no database transaction open."""
     if group.channel == "whatsapp":
+        if settings.followup_whatsapp_via == "composio":
+            return outbound.send_whatsapp_composio(group.address, group.text, template=group.template)
         return outbound.send_whatsapp(group.address, group.text, template=group.template)
     if group.channel == "email":
         return outbound.send_email(group.sender, group.address, group.subject, group.text)
@@ -580,6 +589,11 @@ def run(stop: threading.Event) -> None:
     """Background loop (started with the API when FOLLOWUP_ENABLED=true)."""
     log.info("Follow-ups: %s; review ladder %s; hours %s", "DRY RUN (nothing is sent)" if settings.followup_dry_run
              else "LIVE", settings.followup_review_ladder, settings.followup_hours)
+    if settings.followup_whatsapp_via == "composio":
+        missing = outbound.configured_for_composio_whatsapp()
+        log.info("WhatsApp reminders go out through Composio%s", f" ({missing}: they will fail)" if missing else
+                 "" if settings.composio_whatsapp_template else " as plain text (no COMPOSIO_WHATSAPP_TEMPLATE: "
+                 "delivered only to people who wrote to that number in the last 24 hours)")
     with SessionLocal() as session:
         stored = session.scalar(select(func.count()).select_from(User).where(User.whatsapp_number.is_not(None)))
     if not (stored or settings.whatsapp_senders.strip() or settings.followup_email_to.strip()):

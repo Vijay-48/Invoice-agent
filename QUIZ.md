@@ -448,3 +448,14 @@ text cells, line items, control characters and negative numbers.
     `tds` check say on each, which one goes to review, and why must the May invoice be looked at again? [D-109]
 55. (2026-11-03) A micro supplier with agreed 60-day terms sends an invoice dated 1 October. When is it due, why
     not 30 November, and what does it cost the company to pay on 30 November? [D-110]
+56. (2026-11-03) An invoice for 10 pipes arrives on Monday; the branch receives 8 on Wednesday and rejects 2 as bent,
+    and confirms the GRN on Thursday. What does the `po` check say on Monday and on Thursday, what moves the
+    invoice from one to the other without anyone touching it, and what must happen for it to be approved? [D-112]
+57. (2026-11-03) Why are invoices still in review counted as "billed" against a PO, and what would go wrong if only
+    approved ones were? Why can a confirmed GRN not be cancelled? [D-112]
+58. (2026-11-03) A storekeeper sends "GRN PO-42 / 1 10 2 bent", then "ok". What is saved after each message, and
+    what does the invoice for PO-42 do? Why does a second storekeeper's "CONFIRM 12" not confirm the first one's
+    draft? [D-113]
+59. (2026-11-04) With `FOLLOWUP_WHATSAPP_VIA=composio` and no template, Priya gets a reminder; she replies "1". What
+    happens to her reply, and why doesn't the message ask her for 1 / 2 / STOP? Why can the event say "sent" while
+    she never received it, and what setting prevents that? [D-114]

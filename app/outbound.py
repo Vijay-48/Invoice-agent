@@ -1,5 +1,6 @@
 """Messages and calls we start: WhatsApp messages and phone calls through Twilio's REST API, and
-reminder emails through a connected Gmail (Composio).
+reminder emails through a connected Gmail (Composio). With FOLLOWUP_WHATSAPP_VIA=composio, reminder
+WhatsApp messages go through Composio's WhatsApp toolkit instead (send_whatsapp_composio, D-114).
 
 Used by app/followup.py (reminders) and for replies to what people send us. Nothing here decides
 who may be contacted: callers pass numbers taken from WHATSAPP_SENDERS and addresses from
@@ -94,6 +95,75 @@ def send_whatsapp(number: str, body: str, *, template: bool = False) -> Result:
     except Exception as e:
         log.warning("WhatsApp message not sent: %s", _failure(e).detail)
         return _failure(e)
+
+
+_composio_client = None
+
+
+def composio_whatsapp():
+    """Composio client pinned to the WhatsApp toolkit version (made once, imported lazily like Gmail's)."""
+    global _composio_client
+    if _composio_client is None:
+        from composio import Composio
+        _composio_client = Composio(api_key=settings.composio_api_key, allow_tracking=False,
+                                    toolkit_versions={"whatsapp": settings.composio_whatsapp_version})
+    return _composio_client
+
+
+def configured_for_composio_whatsapp() -> str | None:
+    """None when reminders can go out through Composio, else what is missing."""
+    missing = [name for name, value in (("COMPOSIO_API_KEY", settings.composio_api_key),
+                                        ("COMPOSIO_WHATSAPP_ACCOUNT_ID", settings.composio_whatsapp_account_id),
+                                        ("COMPOSIO_WHATSAPP_PHONE_NUMBER_ID", settings.composio_whatsapp_phone_number_id))
+               if not value]
+    return f"{' / '.join(missing)} not set" if missing else None
+
+
+def _message_id(data) -> str | None:
+    """Meta's message id (wamid...) from the tool's answer, wherever this toolkit version puts it."""
+    if isinstance(data, dict):
+        for key in ("messages", "response_data", "data"):
+            found = _message_id(data.get(key))
+            if found:
+                return found
+        mid = data.get("id")
+        return mid if isinstance(mid, str) and mid.startswith("wamid") else None
+    if isinstance(data, list) and data:
+        return _message_id(data[0])
+    return None
+
+
+def send_whatsapp_composio(number: str, body: str, *, template: bool = False) -> Result:
+    """One reminder through Composio's WhatsApp (Meta Cloud API). template=True uses
+    COMPOSIO_WHATSAPP_TEMPLATE with the text as its single variable. Not retried here: a send that timed out
+    may have gone out; the follow-up retries a failure later."""
+    if settings.followup_dry_run:
+        return Result("dry_run")
+    missing = configured_for_composio_whatsapp()
+    if missing:
+        return Result("failed", detail=missing)
+    to = number.lstrip("+")
+    if template:
+        slug = "WHATSAPP_SEND_TEMPLATE_MESSAGE"
+        args = {"phone_number_id": settings.composio_whatsapp_phone_number_id, "to_number": to,
+                "template_name": settings.composio_whatsapp_template,
+                "language_code": settings.composio_whatsapp_template_language,
+                "components": [{"type": "body", "parameters": [{"type": "text", "text": one_line(body)}]}]}
+    else:
+        slug = "WHATSAPP_SEND_MESSAGE"
+        args = {"phone_number_id": settings.composio_whatsapp_phone_number_id, "to_number": to,
+                "text": body[:MAX_BODY]}
+    try:
+        res = composio_whatsapp().tools.execute(slug, args, user_id=settings.composio_whatsapp_user_id,
+                                                connected_account_id=settings.composio_whatsapp_account_id)
+    except Exception as e:      # the class only: the message may hold a number or the text
+        log.warning("WhatsApp reminder not sent through Composio: %s", type(e).__name__)
+        return Result("failed", detail=f"Composio: {type(e).__name__}")
+    if not res.get("successful"):
+        detail = re.sub(r"\+?\d{8,}", "<number>", str(res.get("error") or "no reason given")).strip()[:200]
+        log.warning("WhatsApp reminder not sent through Composio: %s", detail)
+        return Result("failed", detail=f"Composio {slug}: {detail}")
+    return Result("sent", sid=_message_id(res.get("data")))
 
 
 def email_marker() -> str:

@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -33,6 +35,12 @@ class Settings(BaseSettings):
     msme_payment_days: int = 45         # MSMED Act s.15: at most 45 days for micro and small suppliers...
     msme_default_days: int = 15         # ...and 15 days when no terms are agreed
     tds_checks: bool = True             # suggest a TDS section and amount (app/pipeline/tax.py, D-109)
+    # Purchase orders (D-112): match invoices with their PO and what branches received (GRNs)
+    po_matching: bool = False           # off until POs are entered: otherwise every invoice would warn
+    po_required: bool = False           # with matching on: an invoice without a PO number needs review
+    price_tolerance_pct: float = 1.0    # invoice price above the PO price by more than this needs review
+    quantity_tolerance_pct: float = 0.0  # billed or received above what was accepted / ordered
+    whatsapp_grn: bool = False          # branch staff report goods received on WhatsApp (app/grn_chat.py, D-113)
     amount_tolerance: float = 1.0       # rupees, for rounding differences
     min_confidence: float = 0.85        # extraction confidence floor
     max_pages: int = 5                  # longer PDFs: first and last page plus the pages with most amounts
@@ -132,6 +140,17 @@ class Settings(BaseSettings):
     # Content template (HX...) for messages outside WhatsApp's 24-hour window; empty = those are skipped.
     # Its body must be one variable: "{{1}}"
     twilio_whatsapp_template_sid: str = ""
+    # Follow-up WhatsApp reminders can go out through Composio's WhatsApp (Meta's Cloud API) instead (D-114).
+    # Only the reminders: incoming messages, replies to them, receipts and GRNs stay on Twilio.
+    followup_whatsapp_via: Literal["twilio", "composio"] = "twilio"
+    composio_whatsapp_account_id: str = ""         # the connected account (ca_...) in the Composio dashboard
+    composio_whatsapp_user_id: str = "ap-whatsapp"  # the Composio user id it was connected under
+    composio_whatsapp_phone_number_id: str = ""    # Meta's numeric id of the sending number, not the number
+    # Approved template whose body is one variable, "{{1}}". Empty = plain text, which WhatsApp delivers only
+    # if the person wrote to that number in the last 24 hours (we can't see that: Twilio receives)
+    composio_whatsapp_template: str = ""
+    composio_whatsapp_template_language: str = "en"
+    composio_whatsapp_version: str = "20261101_00"   # pinned WhatsApp toolkit version
     twilio_voice_from: str = ""                  # a Twilio number that can place calls (not the sandbox number)
     # The call is a live AI conversation through Twilio ConversationRelay (needs a public wss:// address
     # and the AI/ML addendum accepted in the Twilio Console)

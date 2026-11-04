@@ -57,8 +57,8 @@ def twilio(monkeypatch):
         yield state
 
 
-def send(twilio, message_sid, sender=f"whatsapp:{NUMBER}", content_type="application/pdf", media=True):
-    data = {"From": sender, "MessageSid": message_sid, "AccountSid": ACCOUNT_SID, "Body": "invoice", "NumMedia": "0"}
+def send(twilio, message_sid, sender=f"whatsapp:{NUMBER}", content_type="application/pdf", media=True, body="invoice"):
+    data = {"From": sender, "MessageSid": message_sid, "AccountSid": ACCOUNT_SID, "Body": body, "NumMedia": "0"}
     if media:
         data |= {"NumMedia": "1", "MediaUrl0": media_url(message_sid), "MediaContentType0": content_type}
     signature = RequestValidator(TOKEN).compute_signature(BASE_URL + PATH, data)

@@ -229,6 +229,21 @@ People answer a reminder with **1** (I'm handling it: reminders pause 24 h), **2
 **STOP**. A reply or a call never approves, rejects or changes an invoice; that stays in the app. End a ladder by
 hand with `POST /api/v1/followups/{id}/stop`.
 
+### Reminders through Composio's WhatsApp (optional)
+
+Reminder messages can be sent from a WhatsApp Business number connected in Composio instead of Twilio; receiving
+invoices and replies stays on Twilio. Connect the WhatsApp toolkit in the Composio dashboard (a Meta WhatsApp
+Business Account; note the connected account id and the user id you connected it under), then:
+
+    FOLLOWUP_WHATSAPP_VIA=composio
+    COMPOSIO_WHATSAPP_ACCOUNT_ID=ca_...
+    COMPOSIO_WHATSAPP_USER_ID=ap-whatsapp
+    COMPOSIO_WHATSAPP_PHONE_NUMBER_ID=          (python -m scripts.composio_whatsapp shows it)
+    COMPOSIO_WHATSAPP_TEMPLATE=invoice_reminder (approved template, body "{{1}}"; strongly advised)
+
+`python -m scripts.composio_whatsapp --send +919876543210` sends a test (with `FOLLOWUP_DRY_RUN=false`). Replies to
+that number aren't read, so these reminders don't ask for 1 / 2 / STOP. `FOLLOWUP_WHATSAPP_VIA=twilio` switches back.
+
 ## AI assistant
 
 `POST /api/v1/assistant/chat` (and the **Assistant** screen in the demo) answers questions about the
@@ -374,6 +389,35 @@ Micro and small suppliers are due within 45 days at most (15 with no agreed term
 `GET /api/v1/payables/ageing` shows what is owed per supplier by days overdue (net of TDS) and MSME invoices past
 due; `GET /api/v1/payables/due?days=7` is the list for the next payment run.
 
+## Branches, purchase orders and goods receipts
+
+Turn matching on with `PO_MATCHING=true` once POs are entered. Then, for a branch, a PO and what arrived:
+
+    curl -X POST localhost:8000/api/v1/branches -H "Content-Type: application/json" -d "{\"code\": \"HYD\", \"name\": \"Hyderabad\", \"gstin\": \"36AABCT1234F1ZR\"}"
+    curl -X POST localhost:8000/api/v1/purchase-orders -H "X-User-Id: 1" -H "Content-Type: application/json" -d "{\"po_number\": \"PO-2026-0042\", \"supplier_name\": \"Sri Lakshmi Steels\", \"supplier_gstin\": \"36AAACS1234A1Z3\", \"po_date\": \"2026-09-01\", \"branch_id\": 1, \"lines\": [{\"description\": \"MS Pipe 25mm\", \"hsn_sac\": \"7306\", \"quantity\": 10, \"unit_price\": 450, \"gst_rate\": 18}]}"
+    curl -X POST localhost:8000/api/v1/purchase-orders/1/grns -H "X-User-Id: 2" -H "Content-Type: application/json" -d "{\"received_on\": \"2026-09-14\", \"confirm\": true, \"lines\": [{\"line_no\": 1, \"received_qty\": 10, \"rejected_qty\": 2, \"reason\": \"two bent\"}]}"
+
+An invoice quoting the PO is checked against it: price (within `PRICE_TOLERANCE_PCT`, 1%) and quantity (at most
+what was accepted and not billed yet). One that arrives before the goods waits in review and goes through by
+itself when the branch confirms the GRN. `GET /api/v1/purchase-orders/{id}` shows per line what was ordered,
+accepted, rejected, billed, and is still to come. `POST .../close` short-closes a PO, `.../cancel` cancels one
+nothing was received for. `PO_REQUIRED=true` sends invoices without a PO number to review.
+
+### Goods received on WhatsApp
+
+With `WHATSAPP_GRN=true`, branch staff (their number stored on their user, and their branch set with
+`PUT /api/v1/users/{id}/branch`) can send:
+
+    GRN                       -> purchase orders of their branch waiting for goods
+    GRN PO-2026-0042          -> its lines and how much is still to come
+    GRN PO-2026-0042          -> a draft GRN, summarised back
+    1 10                         (line 1: 10 received)
+    2 20 2 bent                  (line 2: 20 received, 2 rejected as bent)
+    challan DC-551               (optional)
+    CONFIRM 12 / CANCEL 12    -> confirm or discard draft 12
+
+Nothing counts until CONFIRM; invoices waiting for the goods are then checked again.
+
 ## Production checklist
 
 - **`API_KEY`**: set a long random value (`python -c "import secrets; print(secrets.token_urlsafe(32))"`).
@@ -471,6 +515,9 @@ against a fresh PostgreSQL 17.
     app/security.py          API key check (API_KEY)
     app/gstr2b.py            GSTR-2B upload and reconciliation with approved invoices
     app/payables.py          due dates (supplier terms, MSME), payments marked, AP ageing
+    app/procurement.py       branches, purchase orders, GRNs; quantities received and billed per PO line
+    app/grn_chat.py          GRN on WhatsApp: GRN / CONFIRM / CANCEL, draft then confirm
+    scripts/composio_whatsapp.py  Composio WhatsApp check: numbers, templates, a test reminder
     app/migrate.py           applies the database migrations on start
     migrations/              Alembic migrations (0001 = baseline of every table)
     app/ingest.py            one entry point for every channel (hash, store, queue)
@@ -494,6 +541,7 @@ against a fresh PostgreSQL 17.
     app/pipeline/decide.py   auto-approve / review / duplicate / not an invoice
     app/pipeline/supplier.py supplier history and master: bank details check, hold and confirmation
     app/pipeline/tax.py      TDS section and amount, reverse charge, blocked input tax credit (rule tables)
+    app/pipeline/matching.py three-way match: invoice lines against PO lines and accepted GRN quantities
     app/pipeline/evaluate.py stores values, runs checks, sets status (AI and corrections)
     app/excel.py             workbook writer
     app/assistant.py         AI chat (Agno tools in app/assistant_tools.py), streamed answers

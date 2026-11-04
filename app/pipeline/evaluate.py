@@ -6,13 +6,13 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import payables
+from app import payables, procurement
 from app.models import AuditLog, Invoice, Status, audit
-from app.pipeline import einvoice, journal, supplier, tax
+from app.pipeline import einvoice, journal, matching, supplier, tax
 from app.pipeline.checks import WARN, Check
 from app.pipeline.decide import RULES_VERSION, decide
 from app.pipeline.validate import normalize_extracted, normalize_invoice_no, parse_date, validate
-from app.schemas import ExtractedInvoice
+from app.schemas import ExtractedInvoice, from_stored
 
 log = logging.getLogger("decide")
 
@@ -44,6 +44,7 @@ def evaluate(session: Session, inv: Invoice, data: ExtractedInvoice, *, actor: s
     inv.tds_section = inv.tds_base = inv.tds_rate = inv.tds_amount = None
     session.flush()
     if data.document_type == journal.JOURNAL:
+        matching.clear(session, inv)
         status, reason = _evaluate_journal(session, inv, data, extra_checks or [])
     else:
         checked = data.is_invoice or data.looks_like_invoice
@@ -51,11 +52,13 @@ def evaluate(session: Session, inv: Invoice, data: ExtractedInvoice, *, actor: s
         if result is not None:
             result.checks += (journal.check_invoice_against_journals(session, inv, data)
                               + supplier.check_supplier(session, inv, data) + supplier.check_bank(session, data)
-                              + tax.check_tax(session, inv, data) + (extra_checks or []))
+                              + tax.check_tax(session, inv, data) + matching.check_po(session, inv, data)
+                              + (extra_checks or []))
             status, reason = decide(data, result)
             inv.checks = [c.dict() for c in result.checks]
             inv.duplicate_of_id = result.duplicate_of
         else:
+            matching.clear(session, inv)
             status, reason = decide(data, None)
             inv.checks = []
             inv.duplicate_of_id = None
@@ -78,6 +81,15 @@ def evaluate(session: Session, inv: Invoice, data: ExtractedInvoice, *, actor: s
           actor=actor)
     log.info("Invoice %s -> %s (%s)", inv.id, status, reason)
     return status
+
+
+def recheck(session: Session, inv: Invoice, *, actor: str = "system") -> str:
+    """The checks again on stored values, because something they compare with changed (a GRN was confirmed, a
+    PO entered). A corrected invoice still isn't auto-approved; one that never was can be now."""
+    data = from_stored(inv.extracted)
+    if procurement.corrected(session, inv):
+        return evaluate(session, inv, data, actor=actor, after_correction=True)
+    return evaluate(session, inv, data, actor=actor, extra_checks=_carried_checks(session, inv, data))
 
 
 def _evaluate_journal(session: Session, inv: Invoice, data: ExtractedInvoice,

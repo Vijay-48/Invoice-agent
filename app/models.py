@@ -36,6 +36,7 @@ class User(Base):
     whatsapp_number: Mapped[str | None] = mapped_column(String(20), unique=True)
     # Highest invoice total this user may approve; none = any amount, 0 = may not approve (D-108)
     approval_limit: Mapped[float | None] = mapped_column(Numeric(14, 2))
+    branch_id: Mapped[int | None] = mapped_column(ForeignKey("branches.id"))   # where this person works
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -87,6 +88,10 @@ class Invoice(Base):
     paid_on: Mapped[date | None] = mapped_column(Date)
     paid_reference: Mapped[str | None] = mapped_column(String(100))  # UTR / cheque number
     paid_by: Mapped[str | None] = mapped_column(String(100))
+    # Purchase order matching (app/pipeline/matching.py, D-112)
+    po_id: Mapped[int | None] = mapped_column(ForeignKey("purchase_orders.id"), index=True)
+    branch_id: Mapped[int | None] = mapped_column(ForeignKey("branches.id"), index=True)
+    match_status: Mapped[str | None] = mapped_column(String(20))    # matched | partial | unmatched | no_po
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -372,6 +377,99 @@ class Gstr2bDocument(Base):
     itc_reason: Mapped[str | None] = mapped_column(String(100))
     reverse_charge: Mapped[bool] = mapped_column(default=False)
     supplier_filed_on: Mapped[str | None] = mapped_column(String(10))
+
+
+class Branch(Base):
+    """A place of the company: head office, a branch, a warehouse (D-111). Its GSTIN is the registration
+    used there (one per state); goods are delivered to branches and received there (GRNs)."""
+    __tablename__ = "branches"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(20), unique=True)       # HYD, BLR-WH
+    name: Mapped[str] = mapped_column(String(100))
+    city: Mapped[str | None] = mapped_column(String(60))
+    state_code: Mapped[str | None] = mapped_column(String(2))        # GST state code, 36 = Telangana
+    gstin: Mapped[str | None] = mapped_column(String(15), index=True)
+    address: Mapped[str | None] = mapped_column(Text)
+    active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PurchaseOrder(Base):
+    """What the company ordered from a supplier (D-112). Received quantities come from confirmed GRNs,
+    invoiced ones from matched invoices: both are added up when needed, never stored twice."""
+    __tablename__ = "purchase_orders"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    po_number: Mapped[str] = mapped_column(String(50))
+    po_number_norm: Mapped[str] = mapped_column(String(50), unique=True)
+    supplier_gstin: Mapped[str | None] = mapped_column(String(15), index=True)
+    supplier_name: Mapped[str] = mapped_column(String(255))
+    branch_id: Mapped[int | None] = mapped_column(ForeignKey("branches.id"))   # ordering / billing branch
+    po_date: Mapped[date] = mapped_column(Date)
+    kind: Mapped[str] = mapped_column(String(10), default="goods")      # goods | services
+    # OPEN | PARTIALLY_RECEIVED | RECEIVED | CLOSED (no more expected) | CANCELLED
+    status: Mapped[str] = mapped_column(String(20), default="OPEN", index=True)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[str] = mapped_column(String(100))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class PoLine(Base):
+    __tablename__ = "po_lines"
+    __table_args__ = (UniqueConstraint("po_id", "line_no"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    po_id: Mapped[int] = mapped_column(ForeignKey("purchase_orders.id", ondelete="CASCADE"), index=True)
+    line_no: Mapped[int] = mapped_column(Integer)
+    description: Mapped[str] = mapped_column(String(500))
+    hsn_sac: Mapped[str | None] = mapped_column(String(10))
+    quantity: Mapped[float] = mapped_column(Numeric(14, 3))
+    unit: Mapped[str | None] = mapped_column(String(20))
+    unit_price: Mapped[float] = mapped_column(Numeric(14, 2))            # before tax
+    gst_rate: Mapped[float | None] = mapped_column(Numeric(5, 2))
+    branch_id: Mapped[int | None] = mapped_column(ForeignKey("branches.id"))   # delivered to; none = the PO's
+
+
+class GoodsReceipt(Base):
+    """A GRN (D-112): what a branch received against a PO, or a service confirmed as done. Counts for
+    matching only once CONFIRMED."""
+    __tablename__ = "goods_receipts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    po_id: Mapped[int] = mapped_column(ForeignKey("purchase_orders.id"), index=True)
+    branch_id: Mapped[int | None] = mapped_column(ForeignKey("branches.id"))
+    received_on: Mapped[date] = mapped_column(Date)
+    challan_number: Mapped[str | None] = mapped_column(String(50))     # supplier's delivery challan
+    status: Mapped[str] = mapped_column(String(20), default="DRAFT")     # DRAFT | CONFIRMED | CANCELLED
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[str] = mapped_column(String(100))
+    created_by_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    source: Mapped[str] = mapped_column(String(10), default="api")      # api | whatsapp
+    confirmed_by: Mapped[str | None] = mapped_column(String(100))
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GrnLine(Base):
+    __tablename__ = "grn_lines"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    grn_id: Mapped[int] = mapped_column(ForeignKey("goods_receipts.id", ondelete="CASCADE"), index=True)
+    po_line_id: Mapped[int] = mapped_column(ForeignKey("po_lines.id"), index=True)
+    received_qty: Mapped[float] = mapped_column(Numeric(14, 3))
+    accepted_qty: Mapped[float] = mapped_column(Numeric(14, 3))
+    rejected_qty: Mapped[float] = mapped_column(Numeric(14, 3), default=0)
+    reason: Mapped[str | None] = mapped_column(Text)                    # why rejected: damaged, wrong item
+
+
+class InvoicePoLine(Base):
+    """Which PO line an invoice line was matched to, and how much of it the invoice bills (D-112)."""
+    __tablename__ = "invoice_po_lines"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    invoice_id: Mapped[int] = mapped_column(ForeignKey("invoices.id", ondelete="CASCADE"), index=True)
+    invoice_line: Mapped[int] = mapped_column(Integer)                  # 1-based, as in the Excel sheet
+    po_line_id: Mapped[int] = mapped_column(ForeignKey("po_lines.id"), index=True)
+    quantity: Mapped[float] = mapped_column(Numeric(14, 3))
+    unit_price: Mapped[float] = mapped_column(Numeric(14, 2))
 
 
 class Approval(Base):

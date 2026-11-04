@@ -25,7 +25,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, object_session
 
-from app import chat_store, followup, gmail, gstr2b, migrate, payables, security, voice, whatsapp
+from app import chat_store, followup, gmail, gstr2b, migrate, payables, procurement, security, voice, whatsapp
 from app.background import Background
 from app.config import settings
 from app.db import SessionLocal, get_session
@@ -36,14 +36,17 @@ from app.logs import setup_logging
 from app.models import (
     Approval,
     AuditLog,
+    Branch,
     ChatMessage,
     ChatSession,
     EmailMessage,
     FollowUp,
     FollowUpEvent,
+    GoodsReceipt,
     Gstr2bReturn,
     Invoice,
     PdfPassword,
+    PurchaseOrder,
     Status,
     Supplier,
     SupplierEvent,
@@ -55,6 +58,7 @@ from app.models import (
 )
 from app.pipeline import supplier as supplier_master
 from app.pipeline.evaluate import evaluate
+from app.pipeline.validate import gstin_valid
 from app.schemas import InvoiceCorrection, from_stored
 
 
@@ -113,6 +117,7 @@ def serialize_user(u: User) -> dict:
     return {"id": u.id, "name": u.name, "email": u.email,
             "whatsapp": whatsapp.mask_sender(u.whatsapp_number) if u.whatsapp_number else None,
             "approval_limit": float(u.approval_limit) if u.approval_limit is not None else None,
+            "branch_id": u.branch_id,
             "gmail": {"connected": bool(u.gmail_account_id), "trigger_id": u.gmail_trigger_id,
                       "connected_at": u.gmail_connected_at, "last_sync_at": u.gmail_last_sync_at,
                       # "reconnect" = Gmail access expired or was removed: connect again
@@ -407,7 +412,7 @@ def serialize(inv: Invoice) -> dict:
         "tds": {"section": inv.tds_section, "base": _num(inv.tds_base), "rate": _num(inv.tds_rate),
                 "amount": _num(inv.tds_amount)} if inv.tds_section else None,
         "due_date": inv.due_date, "paid_on": inv.paid_on, "paid_reference": inv.paid_reference,
-        "paid_by": inv.paid_by,
+        "paid_by": inv.paid_by, "po_id": inv.po_id, "branch_id": inv.branch_id, "match_status": inv.match_status,
     }
 
 
@@ -1173,6 +1178,246 @@ def payables_ageing(as_of: date | None = None, session: Session = Depends(get_se
 def payables_due(days: int = Query(7, ge=0, le=365), session: Session = Depends(get_session)):
     """Unpaid invoices due within `days`, and every overdue one: the payment run's list."""
     return payables.due_within(session, days)
+
+
+# ---------- branches, purchase orders, goods receipts (D-111, D-112)
+
+class BranchIn(BaseModel):
+    code: str = Field(min_length=1, max_length=20, description="Short code, e.g. HYD")
+    name: str = Field(min_length=1, max_length=100)
+    city: str | None = Field(None, max_length=60)
+    state_code: str | None = Field(None, pattern=r"^\d{2}$", description="GST state code, e.g. 36")
+    gstin: str | None = Field(None, description="The GST registration used at this branch")
+    address: str | None = None
+
+
+class BranchPatch(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=100)
+    city: str | None = Field(None, max_length=60)
+    state_code: str | None = Field(None, pattern=r"^\d{2}$")
+    gstin: str | None = None
+    address: str | None = None
+    active: bool | None = None
+
+
+def serialize_branch(b: Branch) -> dict:
+    return {"id": b.id, "code": b.code, "name": b.name, "city": b.city, "state_code": b.state_code,
+            "gstin": b.gstin, "address": b.address, "active": b.active}
+
+
+def _check_gstin(gstin: str | None) -> str | None:
+    gstin = (gstin or "").strip().upper() or None
+    if gstin and not gstin_valid(gstin):
+        raise HTTPException(422, f"{gstin} is not a valid GSTIN")
+    return gstin
+
+
+def _branch(session: Session, branch_id: int | None) -> int | None:
+    if branch_id is not None and session.get(Branch, branch_id) is None:
+        raise HTTPException(422, f"No branch {branch_id}")
+    return branch_id
+
+
+@api.post("/branches", status_code=201)
+def create_branch(body: BranchIn, session: Session = Depends(get_session)):
+    gstin = _check_gstin(body.gstin)
+    if gstin and body.state_code and gstin[:2] != body.state_code:
+        raise HTTPException(422, f"GSTIN {gstin} is for state {gstin[:2]}, not {body.state_code}")
+    branch = Branch(code=body.code.strip().upper(), name=body.name.strip(), city=body.city,
+                    state_code=body.state_code or (gstin[:2] if gstin else None), gstin=gstin, address=body.address)
+    session.add(branch)
+    try:
+        session.commit()
+    except IntegrityError:
+        raise HTTPException(409, f"A branch with code {branch.code} already exists") from None
+    return serialize_branch(branch)
+
+
+@api.get("/branches")
+def list_branches(session: Session = Depends(get_session)):
+    return [serialize_branch(b) for b in session.scalars(select(Branch).order_by(Branch.code))]
+
+
+@api.patch("/branches/{branch_id}")
+def update_branch(branch_id: int, body: BranchPatch, session: Session = Depends(get_session)):
+    branch = session.get(Branch, branch_id) or _404("Branch")
+    changes = body.model_dump(exclude_unset=True)
+    if "gstin" in changes:
+        changes["gstin"] = _check_gstin(changes["gstin"])
+    for k, v in changes.items():
+        setattr(branch, k, v)
+    session.commit()
+    return serialize_branch(branch)
+
+
+class UserBranch(BaseModel):
+    branch_id: int | None
+
+
+@api.put("/users/{user_id}/branch")
+def set_user_branch(user_id: int, body: UserBranch, session: Session = Depends(get_session)):
+    """Where this person works: their GRNs are for this branch unless they say otherwise."""
+    target = session.get(User, user_id) or _404("User")
+    target.branch_id = _branch(session, body.branch_id)
+    session.commit()
+    return serialize_user(target)
+
+
+class PoLineIn(BaseModel):
+    description: str = Field(min_length=1, max_length=500)
+    hsn_sac: str | None = Field(None, pattern=r"^\d{4,8}$")
+    quantity: float = Field(gt=0)
+    unit: str | None = Field(None, max_length=20)
+    unit_price: float = Field(ge=0, description="Before tax")
+    gst_rate: float | None = Field(None, ge=0, le=28)
+    branch_id: int | None = Field(None, description="Delivered to; empty = the PO's branch")
+
+
+class PoIn(BaseModel):
+    po_number: str = Field(min_length=1, max_length=50)
+    supplier_name: str = Field(min_length=1, max_length=255)
+    supplier_gstin: str | None = None
+    po_date: date
+    kind: Literal["goods", "services"] = "goods"
+    branch_id: int | None = None
+    notes: str | None = None
+    lines: list[PoLineIn] = Field(min_length=1)
+
+
+def _procurement_error(e: procurement.ProcurementError):
+    return HTTPException(e.status, str(e))
+
+
+@api.post("/purchase-orders", status_code=201)
+def create_purchase_order(body: PoIn, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    """Enter a PO. Invoices already in review that quote its number are checked again."""
+    _branch(session, body.branch_id)
+    for ln in body.lines:
+        _branch(session, ln.branch_id)
+    try:
+        po = procurement.create_po(session, po_number=body.po_number, supplier_name=body.supplier_name,
+                                   supplier_gstin=_check_gstin(body.supplier_gstin), po_date=body.po_date,
+                                   kind=body.kind, branch_id=body.branch_id, notes=body.notes,
+                                   lines=[ln.model_dump() for ln in body.lines], actor=user.name)
+    except procurement.ProcurementError as e:
+        raise _procurement_error(e) from e
+    log.info("PO %s entered by %s: %s, %d line(s)", po.po_number, user.name, po.supplier_name, len(body.lines))
+    rechecked = procurement.after_po_change(session, po, user.name)
+    return {**procurement.serialize_po(session, po, detail=True), "rechecked": rechecked}
+
+
+@api.get("/purchase-orders")
+def list_purchase_orders(status: str | None = None, supplier_gstin: str | None = None,
+                         limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0),
+                         session: Session = Depends(get_session)):
+    q = select(PurchaseOrder).order_by(PurchaseOrder.po_date.desc(), PurchaseOrder.id.desc()).limit(limit).offset(offset)
+    if status:
+        q = q.where(PurchaseOrder.status == status.upper())
+    if supplier_gstin:
+        q = q.where(PurchaseOrder.supplier_gstin == supplier_gstin.upper())
+    return [procurement.serialize_po(session, po) for po in session.scalars(q)]
+
+
+@api.get("/purchase-orders/{po_id}")
+def get_purchase_order(po_id: int, session: Session = Depends(get_session)):
+    """The PO with, per line, how much was ordered, accepted, rejected, billed, and is still to come."""
+    po = session.get(PurchaseOrder, po_id) or _404("Purchase order")
+    return procurement.serialize_po(session, po, detail=True)
+
+
+@api.post("/purchase-orders/{po_id}/close")
+def close_purchase_order(po_id: int, body: Review = Review(), user: User = Depends(current_user),
+                         session: Session = Depends(get_session)):
+    """Nothing more will be delivered (short close)."""
+    return _end_po(session, po_id, "close", body, user)
+
+
+@api.post("/purchase-orders/{po_id}/cancel")
+def cancel_purchase_order(po_id: int, body: Review = Review(), user: User = Depends(current_user),
+                          session: Session = Depends(get_session)):
+    """Only if nothing was received."""
+    return _end_po(session, po_id, "cancel", body, user)
+
+
+def _end_po(session: Session, po_id: int, action: str, body: Review, user: User) -> dict:
+    po = session.scalar(select(PurchaseOrder).where(PurchaseOrder.id == po_id).with_for_update()) or _404("Purchase order")
+    try:
+        procurement.end_po(session, po, "CLOSED" if action == "close" else "CANCELLED", user.name, body.note)
+    except procurement.ProcurementError as e:
+        raise _procurement_error(e) from e
+    session.commit()
+    log.info("PO %s %s by %s", po.po_number, po.status, user.name)
+    return procurement.serialize_po(session, po, detail=True)
+
+
+class GrnLineIn(BaseModel):
+    line_no: int = Field(ge=1, description="The PO line")
+    received_qty: float = Field(gt=0)
+    accepted_qty: float | None = Field(None, ge=0, description="Empty = received less rejected")
+    rejected_qty: float = Field(0, ge=0)
+    reason: str | None = Field(None, description="Why rejected: damaged, wrong item, short shelf life...")
+
+
+class GrnIn(BaseModel):
+    branch_id: int | None = Field(None, description="Empty = the user's branch, else the PO's")
+    received_on: date
+    challan_number: str | None = Field(None, max_length=50)
+    notes: str | None = None
+    lines: list[GrnLineIn] = Field(min_length=1)
+    confirm: bool = Field(False, description="Confirm at once instead of saving a draft")
+
+
+@api.post("/purchase-orders/{po_id}/grns", status_code=201)
+def create_grn(po_id: int, body: GrnIn, user: User = Depends(current_user), session: Session = Depends(get_session)):
+    """Record what a branch received against a PO (for services: what was done). It counts for matching
+    once confirmed."""
+    po = session.get(PurchaseOrder, po_id) or _404("Purchase order")
+    try:
+        grn = procurement.create_grn(session, po, branch_id=_branch(session, body.branch_id) or user.branch_id,
+                                     received_on=body.received_on, challan_number=body.challan_number,
+                                     notes=body.notes, lines=[ln.model_dump() for ln in body.lines], actor=user.name,
+                                     actor_id=user.id)
+        if body.confirm:
+            procurement.confirm_grn(session, grn, user.name)
+    except procurement.ProcurementError as e:
+        raise _procurement_error(e) from e
+    log.info("GRN %s for PO %s by %s (%s)", grn.id, po.po_number, user.name, grn.status)
+    rechecked = procurement.after_po_change(session, po, user.name) if body.confirm else (session.commit() or [])
+    return {**procurement.serialize_grn(session, grn), "po_status": po.status, "rechecked": rechecked}
+
+
+@api.get("/grns/{grn_id}")
+def get_grn(grn_id: int, session: Session = Depends(get_session)):
+    return procurement.serialize_grn(session, session.get(GoodsReceipt, grn_id) or _404("GRN"))
+
+
+@api.post("/grns/{grn_id}/confirm")
+def confirm_grn(grn_id: int, body: Review = Review(), user: User = Depends(current_user),
+                session: Session = Depends(get_session)):
+    """The receipt counts from now on, and invoices waiting for it are checked again."""
+    return _grn_action(session, grn_id, "confirm", body, user)
+
+
+@api.post("/grns/{grn_id}/cancel")
+def cancel_grn(grn_id: int, body: Review = Review(), user: User = Depends(current_user),
+               session: Session = Depends(get_session)):
+    """A draft only."""
+    return _grn_action(session, grn_id, "cancel", body, user)
+
+
+def _grn_action(session: Session, grn_id: int, action: str, body: Review, user: User) -> dict:
+    grn = session.scalar(select(GoodsReceipt).where(GoodsReceipt.id == grn_id).with_for_update()) or _404("GRN")
+    try:
+        if action == "confirm":
+            po = procurement.confirm_grn(session, grn, user.name)
+        else:
+            procurement.cancel_grn(session, grn, user.name, body.note)
+            po = None
+    except procurement.ProcurementError as e:
+        raise _procurement_error(e) from e
+    log.info("GRN %s %s by %s", grn.id, grn.status, user.name)
+    rechecked = procurement.after_po_change(session, po, user.name) if po else (session.commit() or [])
+    return {**procurement.serialize_grn(session, grn), "po_status": po.status if po else None, "rechecked": rechecked}
 
 
 # ---------- follow-ups: WhatsApp reminders and calls (what was sent, to whom, and what came of it)
