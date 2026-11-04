@@ -1,0 +1,4 @@
+{
+    "python.defaultInterpreterPath": "C:\\Users\\rocky\\anaconda3\\python.exe",
+    "python.analysis.extraPaths": ["${workspaceFolder}"]
+}
